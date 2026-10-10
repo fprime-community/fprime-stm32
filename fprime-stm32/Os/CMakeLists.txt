@@ -7,3 +7,4 @@
 ####
 
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Stm32H7")
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Stm32F4")
