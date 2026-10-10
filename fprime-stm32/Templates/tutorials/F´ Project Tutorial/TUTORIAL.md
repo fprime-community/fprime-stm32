@@ -167,7 +167,7 @@ cp -r lib/fprime-stm32/fprime-stm32/Templates/stm32h7/config Stm32h7Project
 Finally, inside your project's `settings.ini` file, make sure to include the path to your `config/` directory so that F´ picks up your custom configuration overrides. Just below the `library_locations:` line add:
 
 ```ini
-config_directory: ./config
+config_directory: ./Stm32h7Project/config
 ```
 
 **Verification.** This ensures that F´ will use your custom configuration settings from the `config/` directory on the next `fprime-util generate`.
