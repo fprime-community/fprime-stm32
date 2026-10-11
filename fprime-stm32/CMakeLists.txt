@@ -23,11 +23,20 @@ add_library(FprimeStm32Allocator OBJECT
     "${CMAKE_CURRENT_LIST_DIR}/Allocator/MallocWrappers.cpp"
 )
 target_link_libraries(FprimeStm32Allocator PUBLIC Fw_Types Os_Baremetal_OverrideNewDelete)
+if (DEFINED FPRIME_STM32_BOOTSTRAP_POOL_SIZE)
+    target_compile_definitions(FprimeStm32Allocator PRIVATE
+        FPRIME_STM32_BOOTSTRAP_POOL_SIZE=${FPRIME_STM32_BOOTSTRAP_POOL_SIZE}
+    )
+endif()
 target_link_options(FprimeStm32Allocator INTERFACE
     "-Wl,--wrap=malloc"
     "-Wl,--wrap=calloc"
     "-Wl,--wrap=realloc"
     "-Wl,--wrap=free"
+    "-Wl,--wrap=_malloc_r"
+    "-Wl,--wrap=_calloc_r"
+    "-Wl,--wrap=_realloc_r"
+    "-Wl,--wrap=_free_r"
 )
 
 ####
