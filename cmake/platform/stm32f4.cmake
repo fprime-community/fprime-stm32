@@ -6,6 +6,8 @@ set(FPRIME_USE_BAREMETAL_SCHEDULER ON CACHE BOOL
     "Use cooperative bare-metal task scheduling" FORCE)
 set(FPRIME_USE_POSIX OFF CACHE INTERNAL "STM32F4 has no POSIX layer" FORCE)
 set(FPRIME_HAS_SOCKETS OFF CACHE INTERNAL "STM32F4 has no socket layer" FORCE)
+set(FPRIME_STM32_BOOTSTRAP_POOL_SIZE 32768 CACHE INTERNAL
+    "STM32F4 bootstrap pool size (bytes)" FORCE)
 
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Platform")
 
@@ -27,4 +29,8 @@ register_fprime_config(
     BASE_CONFIG
 )
 
-target_compile_definitions(PlatformStm32f4 INTERFACE TGT_OS_TYPE_STM32F4)
+target_compile_definitions(PlatformStm32f4 INTERFACE
+    TGT_OS_TYPE_STM32F4
+    FPRIME_STM32_UART_TX_RING_SIZE=2048
+    FPRIME_STM32_UART_RX_RING_SIZE=2048
+)
