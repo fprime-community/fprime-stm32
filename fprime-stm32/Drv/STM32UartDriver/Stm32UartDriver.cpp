@@ -223,6 +223,10 @@ extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
 
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart, uint16_t Size) {
     FW_ASSERT(huart != nullptr);
+    
+    if (HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT) {
+        return;
+    }
     Stm32::Stm32UartDriver* const component = findUartComponent(huart);
     if (component != nullptr) {
         component->signalRxChunk(Size);
