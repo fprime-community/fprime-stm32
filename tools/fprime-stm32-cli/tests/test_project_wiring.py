@@ -134,7 +134,7 @@ def test_patch_top_cmakelists_adds_allocator_dependency():
     call_start = patched.index("register_fprime_module(")
     call_end = patched.index(")", call_start)
     assert "FprimeStm32Allocator" in patched[call_start:call_end]
-    assert len(actions) == 1
+    assert len(actions) == 2
 
 
 def test_patch_top_cmakelists_idempotent():
@@ -205,3 +205,20 @@ def test_ensure_deployment_registered_idempotent():
     assert once_namespace == twice_namespace
     assert root_actions == []
     assert namespace_actions == []
+
+
+def test_patch_deployment_cmakelists_targets_requested_platform():
+    patched, actions = patch_deployment_cmakelists(DEPLOYMENT_CMAKELISTS, "stm32f4")
+
+    assert "restrict_platforms(stm32f4)" in patched
+    assert "stm32h7" not in patched
+    assert any("stm32f4 platform" in a for a in actions)
+
+
+def test_patch_deployment_cmakelists_retargets_existing_restriction():
+    h7, _ = patch_deployment_cmakelists(DEPLOYMENT_CMAKELISTS, "stm32h7")
+    f4, actions = patch_deployment_cmakelists(h7, "stm32f4")
+
+    assert "restrict_platforms(stm32f4)" in f4
+    assert "restrict_platforms(stm32h7)" not in f4
+    assert any("Changed restrict_platforms(stm32h7)" in a for a in actions)

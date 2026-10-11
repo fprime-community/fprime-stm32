@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fprime_stm32.cubemx_cmake import CubeMxCMakeInfo
+from fprime_stm32.family import Family
 
 _HEADER_TEMPLATE = """####
 # Board hardware support for this project.
@@ -18,7 +19,7 @@ _HEADER_TEMPLATE = """####
 # regenerating %(hal_dir_name)s/ from CubeMX instead of hand-editing this file.
 ####
 
-if (FPRIME_PLATFORM STREQUAL "stm32h7")
+if (FPRIME_PLATFORM STREQUAL "%(platform)s")
     set(FPRIME_STM32_HAL_SOURCES
 %(hal_sources)s
     )
@@ -37,7 +38,7 @@ if (FPRIME_PLATFORM STREQUAL "stm32h7")
 
     target_compile_options(FprimeStm32 PRIVATE -ffunction-sections -fdata-sections)
 
-    target_link_libraries(FprimeStm32 PUBLIC PlatformStm32h7)
+    target_link_libraries(FprimeStm32 PUBLIC %(platform_target)s)
 
     # %(hal_dir_name)s/%(it_source)s is intentionally NOT compiled into the
     # FprimeStm32 static library above. GNU ld only extracts an .o from a
@@ -60,12 +61,37 @@ endif()
 """
 
 
-def discover_extra_config_sources(hardware_dir: Path) -> list[str]:
+def discover_extra_config_sources(hardware_dir: Path, scaffold: list[str] = ()) -> list[str]:
+    """Project-owned glue sources under Hardware/config/src, plus any about to be scaffolded."""
     config_src = hardware_dir / "config" / "src"
-    if not config_src.is_dir():
-        return []
-    sources = sorted(config_src.glob("*.c")) + sorted(config_src.glob("*.cpp"))
-    return [f"config/src/{p.name}" for p in sources]
+    names = set()
+    if config_src.is_dir():
+        names.update(p.name for p in config_src.glob("*.c"))
+        names.update(p.name for p in config_src.glob("*.cpp"))
+    names.update(Path(rel).name for rel in scaffold if rel.startswith("config/src/"))
+    return [f"config/src/{name}" for name in sorted(names, key=lambda n: (not n.endswith(".c"), n))]
+
+
+def template_hardware_config_dir(family: Family) -> Path | None:
+    """Locate the family's Hardware/config template shipped with the fprime-stm32 library."""
+    template = Path(__file__).resolve().parents[4] / "fprime-stm32" / "Templates" / family.name / "Hardware" / "config"
+    return template if template.is_dir() else None
+
+
+def plan_hardware_config_scaffold(hardware_dir: Path, family: Family) -> dict[str, str]:
+    """Template glue files (clock init, TIM2 timebase, PlatformMemory.hpp) missing from the
+    project's Hardware/config/, as {path relative to Hardware/: contents}. Never overwrites."""
+    template = template_hardware_config_dir(family)
+    if template is None:
+        return {}
+    missing = {}
+    for source in sorted(template.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = f"config/{source.relative_to(template).as_posix()}"
+        if not (hardware_dir / relative).exists():
+            missing[relative] = source.read_text()
+    return missing
 
 
 def render_hardware_cmakelists(
@@ -75,6 +101,8 @@ def render_hardware_cmakelists(
     startup_out_name: str,
     extra_config_sources: list[str],
     hardware_dir: Path,
+    family: Family,
+    scaffolded: list[str] = (),
 ) -> str:
     hal_sources = (
         [f"{hal_dir_name}/{path}" for path in info.driver_sources]
@@ -82,10 +110,12 @@ def render_hardware_cmakelists(
         + list(extra_config_sources)
     )
     include_dirs = [f"        \"${{CMAKE_CURRENT_LIST_DIR}}/{hal_dir_name}/{path}\"" for path in info.include_dirs]
-    if (hardware_dir / "config" / "include").is_dir():
+    if (hardware_dir / "config" / "include").is_dir() or any(r.startswith("config/include/") for r in scaffolded):
         include_dirs.insert(0, '        "${CMAKE_CURRENT_LIST_DIR}/config/include"')
 
     return _HEADER_TEMPLATE % {
+        "platform": family.name,
+        "platform_target": family.platform_target,
         "hal_dir_name": hal_dir_name,
         "hal_sources": "\n".join(f"        {source}" for source in hal_sources),
         "include_dirs": "\n".join(include_dirs),

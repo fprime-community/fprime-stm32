@@ -173,3 +173,67 @@ def test_fails_when_cubemx_project_not_under_hardware(fprime_project, tmp_path, 
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "not a direct subdirectory of" in captured.err
+
+
+F4_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "cubemx_stm32f401"
+
+
+@pytest.fixture
+def f4_cubemx_project(fprime_project):
+    dest = fprime_project / "Hardware" / "cubemx_stm32f401"
+    shutil.copytree(F4_FIXTURE_DIR, dest)
+    return dest
+
+
+def test_f4_sync_auto_detects_family_and_wires_everything(fprime_project, f4_cubemx_project):
+    deployment_dir = _add_target_deployment(fprime_project, "Stm32f4Deployment")
+
+    exit_code = main(["sync", str(f4_cubemx_project)])
+
+    assert exit_code == 0
+    hardware = fprime_project / "Hardware"
+    assert "_sstack = _estack - _Min_Stack_Size;" in (hardware / "linker" / "STM32F401XX_FLASH.ld").read_text()
+    assert "bl Stm32_registerBootstrapAllocator" in (hardware / "startup" / "startup_stm32f401xe.s").read_text()
+
+    cmake_text = (hardware / "CMakeLists.txt").read_text()
+    assert 'FPRIME_PLATFORM STREQUAL "stm32f4"' in cmake_text
+    assert "PlatformStm32f4" in cmake_text
+    assert "config/src/stm32f4_clock.c" in cmake_text  # scaffolded from the family template
+    assert (hardware / "config" / "src" / "stm32f4_clock.c").exists()
+    assert (hardware / "config" / "include" / "PlatformMemory.hpp").exists()
+
+    assert "restrict_platforms(stm32f4)" in (deployment_dir / "CMakeLists.txt").read_text()
+
+
+def test_sync_auto_finds_cubemx_project_when_path_omitted(fprime_project, f4_cubemx_project):
+    exit_code = main(["sync"])
+
+    assert exit_code == 0
+    assert (fprime_project / "Hardware" / "linker" / "STM32F401XX_FLASH.ld").exists()
+
+
+def test_family_flag_contradicting_project_fails(fprime_project, f4_cubemx_project, capsys):
+    exit_code = main(["sync", str(f4_cubemx_project), "--family", "stm32h7"])
+
+    assert exit_code == 1
+    assert "looks like stm32f4" in capsys.readouterr().err
+    assert not (fprime_project / "Hardware" / "linker").exists()
+
+
+def test_sync_does_not_overwrite_existing_config_glue(fprime_project, f4_cubemx_project):
+    glue = fprime_project / "Hardware" / "config" / "src" / "stm32f4_clock.c"
+    glue.parent.mkdir(parents=True)
+    glue.write_text("// board specific\n")
+
+    assert main(["sync", str(f4_cubemx_project)]) == 0
+
+    assert glue.read_text() == "// board specific\n"
+
+
+def test_config_registered_in_namespace_when_it_lives_there(fprime_project, cubemx_project):
+    (fprime_project / "config").mkdir()
+
+    assert main(["sync", str(cubemx_project)]) == 0
+
+    assert "/config" in (fprime_project / "CMakeLists.txt").read_text()
+    assert "/config" not in (fprime_project.parent / "CMakeLists.txt").read_text()
