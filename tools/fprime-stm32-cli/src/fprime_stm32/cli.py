@@ -6,13 +6,19 @@ from pathlib import Path
 from fprime_stm32.cubemx_cmake import parse_cubemx_cmake
 from fprime_stm32.discovery import (
     discover_cubemx_sources,
+    find_cubemx_project,
     find_deployment_to_wire,
     find_fprime_project_root,
     find_namespace_cmakelists,
     find_root_cmakelists,
 )
 from fprime_stm32.errors import CliError, ProjectDiscoveryError
-from fprime_stm32.hardware_cmake import discover_extra_config_sources, render_hardware_cmakelists
+from fprime_stm32.family import AUTO, FAMILY_CHOICES, detect_family
+from fprime_stm32.hardware_cmake import (
+    discover_extra_config_sources,
+    plan_hardware_config_scaffold,
+    render_hardware_cmakelists,
+)
 from fprime_stm32.linker import patch_linker_script
 from fprime_stm32.memory_model import parse_memory_block
 from fprime_stm32.project_wiring import (
@@ -31,9 +37,21 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sync = subparsers.add_parser(
-        "sync", help="Port a CubeMX STM32H7 project's linker/startup files into an F' Hardware/ directory"
+        "sync", help="Port a CubeMX STM32H7/STM32F4 project's linker/startup files into an F' Hardware/ directory"
     )
-    sync.add_argument("cubemx_project", type=Path, help="Path to the STM32CubeMX project directory")
+    sync.add_argument(
+        "cubemx_project",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Path to the STM32CubeMX project directory (auto-detected under Hardware/ if omitted)",
+    )
+    sync.add_argument(
+        "--family",
+        choices=FAMILY_CHOICES,
+        default=AUTO,
+        help="STM32 family to target; 'auto' (default) detects it from the CubeMX project files",
+    )
     sync.add_argument(
         "--dry-run", action="store_true", help="Show the proposed changes without writing any files"
     )
@@ -64,11 +82,19 @@ def _resolve_hal_dir_name(cwd: Path, cubemx_project: Path, hardware_dir: Path) -
 
 
 def _run_sync(
-    cwd: Path, cubemx_project: Path, dry_run: bool, deployment: str | None, wire_deployment: str | None
+    cwd: Path,
+    cubemx_project: Path | None,
+    dry_run: bool,
+    deployment: str | None,
+    wire_deployment: str | None,
+    family_name: str = AUTO,
 ) -> int:
     project = find_fprime_project_root(cwd, deployment=deployment)
+    if cubemx_project is None:
+        cubemx_project = find_cubemx_project(project.hardware_dir)
+    family = detect_family(cubemx_project, family_name)
     hal_dir_name = _resolve_hal_dir_name(cwd, cubemx_project, project.hardware_dir)
-    sources = discover_cubemx_sources(cubemx_project)
+    sources = discover_cubemx_sources(cubemx_project, family)
 
     linker_text = sources.linker_script.read_text()
     startup_text = sources.startup_script.read_text()
@@ -80,14 +106,15 @@ def _run_sync(
 
     existing_linker_text = linker_out.read_text() if linker_out.exists() else None
 
-    memory_map = parse_memory_block(linker_text)
+    memory_map = parse_memory_block(linker_text, family.name)
     patched_linker, linker_actions = patch_linker_script(
-        linker_text, memory_map, existing_output_text=existing_linker_text
+        linker_text, memory_map, existing_output_text=existing_linker_text, family=family.name
     )
-    patched_startup, startup_actions = patch_startup_script(startup_text)
+    patched_startup, startup_actions = patch_startup_script(startup_text, family.name)
     cubemx_info = parse_cubemx_cmake(cubemx_cmake_text)
 
-    extra_config_sources = discover_extra_config_sources(project.hardware_dir)
+    scaffold = plan_hardware_config_scaffold(project.hardware_dir, family)
+    extra_config_sources = discover_extra_config_sources(project.hardware_dir, list(scaffold))
     patched_cmake = render_hardware_cmakelists(
         hal_dir_name=hal_dir_name,
         info=cubemx_info,
@@ -95,6 +122,8 @@ def _run_sync(
         startup_out_name=startup_out.name,
         extra_config_sources=extra_config_sources,
         hardware_dir=project.hardware_dir,
+        family=family,
+        scaffolded=list(scaffold),
     )
     cmake_actions = [
         f"Regenerated Hardware/CMakeLists.txt for chip {cubemx_info.chip_define} from {hal_dir_name}/",
@@ -106,13 +135,20 @@ def _run_sync(
     ]
 
     # Project-wide build-graph wiring: guarantees Hardware/ and config/ are reachable from the
-    # build, and (if a deployment exists) that it's linked against the stm32h7 platform/HAL/allocator.
+    # build, and (if a deployment exists) that it's linked against the detected platform/HAL/allocator.
     project_wiring = []
 
     root_cmake_path = find_root_cmakelists(project.namespace_root)
     namespace_cmake_path = find_namespace_cmakelists(project.namespace_root)
-    patched_root_cmake, root_actions = patch_root_cmakelists(root_cmake_path.read_text())
-    patched_namespace_cmake, namespace_actions = patch_namespace_cmakelists(namespace_cmake_path.read_text())
+    # `fprime-util new` puts config/ inside the namespace directory; register it from whichever
+    # CMakeLists.txt sits next to it (root if there's no namespace-level config/).
+    config_in_namespace = (project.namespace_root / "config").is_dir()
+    patched_root_cmake, root_actions = patch_root_cmakelists(
+        root_cmake_path.read_text(), add_config=not config_in_namespace
+    )
+    patched_namespace_cmake, namespace_actions = patch_namespace_cmakelists(
+        namespace_cmake_path.read_text(), add_config=config_in_namespace
+    )
 
     deployment_dir = find_deployment_to_wire(project.namespace_root, wire_deployment)
     deployment_note = None
@@ -132,7 +168,7 @@ def _run_sync(
 
         deployment_cmake_path = deployment_dir / "CMakeLists.txt"
         top_cmake_path = deployment_dir / "Top" / "CMakeLists.txt"
-        patched_deployment_cmake, deployment_actions = patch_deployment_cmakelists(deployment_cmake_path.read_text())
+        patched_deployment_cmake, deployment_actions = patch_deployment_cmakelists(deployment_cmake_path.read_text(), family.name)
         patched_top_cmake, top_actions = patch_top_cmakelists(top_cmake_path.read_text())
         project_wiring.append(
             FileChange(f"Deployment CMakeLists.txt ({deployment_dir.name})", deployment_cmake_path, deployment_actions)
@@ -144,6 +180,8 @@ def _run_sync(
 
     report = SyncReport(
         chip_tag=sources.chip_tag,
+        family=family.name,
+        scaffolded=list(scaffold),
         memory_map=memory_map,
         linker_actions=linker_actions,
         startup_actions=startup_actions,
@@ -163,6 +201,8 @@ def _run_sync(
         root_cmake_path: patched_root_cmake,
         namespace_cmake_path: patched_namespace_cmake,
     }
+    for relative, content in scaffold.items():
+        patched_texts[project.hardware_dir / relative] = content
     if deployment_dir is not None:
         patched_texts[deployment_cmake_path] = patched_deployment_cmake
         patched_texts[top_cmake_path] = patched_top_cmake
@@ -195,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "sync":
-            return _run_sync(Path.cwd(), args.cubemx_project, args.dry_run, args.deployment, args.wire_deployment)
+            return _run_sync(Path.cwd(), args.cubemx_project, args.dry_run, args.deployment, args.wire_deployment, args.family)
     except CliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

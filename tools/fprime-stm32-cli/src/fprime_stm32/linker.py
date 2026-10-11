@@ -68,6 +68,49 @@ def _rename_region(text: str, old_name: str, new_name: str) -> str:
 
 
 def patch_linker_script(
+    text: str, memory_map: MemoryMap, existing_output_text: str | None = None, family: str = "stm32h7"
+) -> tuple[str, list[str]]:
+    if family == "stm32f4":
+        return _patch_f4_linker_script(text)
+    return _patch_h7_linker_script(text, memory_map, existing_output_text)
+
+
+_F4_MIN_STACK_BYTES = 0x1000
+_MIN_STACK_RE = re.compile(r"^(_Min_Stack_Size\s*=\s*)(0[xX][0-9a-fA-F]+|\d+)\s*;[^\n]*", re.MULTILINE)
+_NOLOAD_TARGET_RE = re.compile(r"^([ \t]*\.(?:bss|_user_heap_stack))[ \t]*:", re.MULTILINE)
+
+
+def _patch_f4_linker_script(text: str) -> tuple[str, list[str]]:
+    """F4 has one contiguous, DMA-visible SRAM, so no region remap is needed. The script only
+    needs a bare-metal-sized MSP stack (with an `_sstack` symbol) and NOLOAD .bss/heap sections.
+    """
+    actions: list[str] = []
+    patched = text
+
+    stack_match = _MIN_STACK_RE.search(patched)
+    if stack_match is None:
+        raise LinkerScriptError("Could not find '_Min_Stack_Size' in the linker script (unrecognized template)")
+    current = int(stack_match.group(2), 0)
+    stack_size = max(current, _F4_MIN_STACK_BYTES)
+    replacement = (
+        f"{stack_match.group(1)}0x{stack_size:X};    /* reserve for the bare-metal MSP stack */"
+    )
+    if "_sstack" not in patched:
+        replacement += "\n_sstack = _estack - _Min_Stack_Size;"
+        actions.append("Defined _sstack = _estack - _Min_Stack_Size")
+    patched = patched[: stack_match.start()] + replacement + patched[stack_match.end() :]
+    if stack_size != current:
+        actions.append(f"Raised _Min_Stack_Size from 0x{current:X} to 0x{stack_size:X}")
+
+    patched, n = _NOLOAD_TARGET_RE.subn(r"\1 (NOLOAD) :", patched)
+    if n == 0:
+        raise LinkerScriptError("Could not find the .bss/._user_heap_stack output sections (unrecognized template)")
+    actions.append(f"Marked {n} section(s) (.bss/._user_heap_stack) NOLOAD")
+
+    return patched, actions
+
+
+def _patch_h7_linker_script(
     text: str, memory_map: MemoryMap, existing_output_text: str | None = None
 ) -> tuple[str, list[str]]:
     actions: list[str] = []

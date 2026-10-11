@@ -16,3 +16,7 @@ class StartupScriptError(CliError):
 
 class CubeMxCMakeError(CliError):
     """Raised when the CubeMX-generated cmake/stm32cubemx/CMakeLists.txt is missing or malformed."""
+
+
+class FamilyDetectionError(CliError):
+    """Raised when the STM32 family can't be determined, is unsupported, or contradicts --family."""

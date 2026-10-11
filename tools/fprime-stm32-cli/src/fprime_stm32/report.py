@@ -22,6 +22,8 @@ class SyncReport:
     startup_out: Path
     cmake_out: Path
     dry_run: bool
+    family: str = "stm32h7"
+    scaffolded: list[str] = field(default_factory=list)
     project_wiring: list[FileChange] = field(default_factory=list)
     deployment_note: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -31,13 +33,17 @@ class SyncReport:
             kib = region.length_bytes / 1024
             return f"  {label:<10} 0x{region.origin:08X}  {kib:.0f} KiB  (region {region.name!r})"
 
+        memory = self.memory_map
+        region_lines = [region_line("FLASH", memory.flash)]
+        for label, region in (("AXI SRAM", memory.axi_sram), ("DTCM RAM", memory.dtcm), ("SRAM", memory.ram)):
+            if region is not None:
+                region_lines.append(region_line(label, region))
+
         lines = [
-            f"fprime-stm32 sync - STM32H7 target: {self.chip_tag}",
+            f"fprime-stm32 sync - {self.family.upper()} target: {self.chip_tag}",
             "",
             "Memory bounds extracted:",
-            region_line("FLASH", self.memory_map.flash),
-            region_line("AXI SRAM", self.memory_map.axi_sram),
-            region_line("DTCM RAM", self.memory_map.dtcm),
+            *region_lines,
             "",
             "Linker script changes:",
             *[f"  - {a}" for a in self.linker_actions],
@@ -49,6 +55,11 @@ class SyncReport:
             *[f"  - {a}" for a in self.cmake_actions],
             "",
         ]
+
+        if self.scaffolded:
+            lines.append("Hardware/config scaffolded from the fprime-stm32 template (review before flashing):")
+            lines.extend(f"  - {name}" for name in self.scaffolded)
+            lines.append("")
 
         for change in self.project_wiring:
             lines.append(f"{change.label} changes:")

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fprime_stm32.errors import CubeMxCMakeError, ProjectDiscoveryError, StartupScriptError, LinkerScriptError
+from fprime_stm32.family import Family
 
 
 @dataclass
@@ -63,7 +64,28 @@ def _find_one(candidates: list[Path], kind: str) -> Path:
     return candidates[0]
 
 
-def discover_cubemx_sources(cubemx_path: Path) -> CubeMxSources:
+def find_cubemx_project(hardware_dir: Path) -> Path:
+    """Find the single CubeMX project (a Hardware/ subdirectory with a CubeMX .ioc file or
+    cmake/stm32cubemx/CMakeLists.txt) when the user doesn't name one."""
+    candidates = sorted(
+        p
+        for p in hardware_dir.iterdir()
+        if p.is_dir() and (any(p.glob("*.ioc")) or (p / "cmake" / "stm32cubemx" / "CMakeLists.txt").is_file())
+    )
+    if not candidates:
+        raise ProjectDiscoveryError(
+            f"No CubeMX project found under {hardware_dir}. Generate one into Hardware/<name>_hal/ "
+            "or pass its path explicitly."
+        )
+    if len(candidates) > 1:
+        names = ", ".join(c.name for c in candidates)
+        raise ProjectDiscoveryError(
+            f"Found multiple CubeMX projects under {hardware_dir} ({names}). Pass the one to sync explicitly."
+        )
+    return candidates[0]
+
+
+def discover_cubemx_sources(cubemx_path: Path, family: Family) -> CubeMxSources:
     if not cubemx_path.is_dir():
         raise ProjectDiscoveryError(f"CubeMX project path does not exist or is not a directory: {cubemx_path}")
 
@@ -74,12 +96,12 @@ def discover_cubemx_sources(cubemx_path: Path) -> CubeMxSources:
         linker_candidates = sorted(cubemx_path.glob("build/**/*.ld"))
     linker_script = _find_one(linker_candidates, "linker script")
 
-    startup_candidates = sorted((cubemx_path / "Core" / "Startup").glob("startup_stm32h7*.s"))
+    startup_candidates = sorted((cubemx_path / "Core" / "Startup").glob(family.startup_glob))
     if not startup_candidates:
-        startup_candidates = sorted(cubemx_path.glob("startup_stm32h7*.s"))
+        startup_candidates = sorted(cubemx_path.glob(family.startup_glob))
     startup_script = _find_one(startup_candidates, "startup assembly file")
 
-    chip_match = re.search(r"stm32h7\w*", startup_script.stem, re.IGNORECASE)
+    chip_match = re.search(family.chip_re, startup_script.stem, re.IGNORECASE)
     chip_tag = chip_match.group(0) if chip_match else startup_script.stem
 
     cubemx_cmake_file = cubemx_path / "cmake" / "stm32cubemx" / "CMakeLists.txt"

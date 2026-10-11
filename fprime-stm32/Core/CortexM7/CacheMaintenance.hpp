@@ -24,6 +24,7 @@ namespace Stm32 {
 //! e.g. STM32H753xx_FLASH.ld). The DTCM bus is not reachable by any DMA
 //! controller on this chip, unlike the default AXI SRAM region -- a buffer
 //! handed to a `_DMA` HAL call must never live here.
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
 constexpr std::uintptr_t DTCM_RAM_BASE = 0x20000000U;
 constexpr std::uintptr_t DTCM_RAM_SIZE = 0x20000U;  // 128 KiB
 
@@ -55,6 +56,22 @@ inline void CleanDCacheForDma(const void* addr, std::size_t size) {
 inline void InvalidateDCacheForDma(void* addr, std::size_t size) {
     SCB_InvalidateDCache_by_Addr(reinterpret_cast<uint32_t*>(addr), static_cast<int32_t>(size));
 }
+#else
+inline void AssertDmaSafe(const void* addr, std::size_t size) {
+    (void)size;
+    FW_ASSERT(addr != nullptr);
+}
+
+inline void CleanDCacheForDma(const void* addr, std::size_t size) {
+    (void)addr;
+    (void)size;
+}
+
+inline void InvalidateDCacheForDma(void* addr, std::size_t size) {
+    (void)addr;
+    (void)size;
+}
+#endif
 
 }  // namespace Stm32
 
