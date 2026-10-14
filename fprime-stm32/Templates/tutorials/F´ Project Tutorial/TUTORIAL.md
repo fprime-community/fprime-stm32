@@ -889,13 +889,60 @@ which ST-LINK_gdbserver
 which STM32CubeProgrammer
 ```
 
->[!TIP] 
->Remember that you can test your program using the native fprime-gds with:
-> ```shell
-> #In stm32h7-project
-> fprime-gds --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
-> ```
+## 11. Testing your Deployment
 
-## 11. Conclusion
+### 11a. Testing with `fprime-gds`
+
+**Goal.** Confirm the flashed board is alive and talking to a ground tool, using the same `fprime-gds` developer GDS you'd use for any F´ deployment.
+
+**Rationale.** `fprime-gds` is an F´-provided development and testing tool: it's how you confirm, as you iterate on hardware and flight software, that commands uplink, telemetry downlinks, and events log correctly. It is **not** intended for flight/mission operations — there's no multi-user access control, command-approval workflow, long-term archive, or operator procedure support. For this tutorial's purposes (bringing up and testing your deployment), it is exactly the right tool.
+
+**Execution.** With your virtual environment activated and the board flashed and running (step 10), launch `fprime-gds` pointed at the UART device your board enumerates as (commonly `/dev/ttyACM0` on Linux; check `dmesg` or your OS's device manager if unsure) and the dictionary your build in step 9 produced:
+
+```shell
+# In stm32h7-project
+fprime-gds --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
+```
+
+`--no-app` tells `fprime-gds` not to launch a deployment binary itself — the binary is already running on the board, not on your host — and `--communication-selection uart` with the matching `--uart-device`/`--uart-baud` (115200, matching the USART1 configuration from step 7) tells it how to reach the board instead of the default TCP/IP transport.
+
+**Verification.** `fprime-gds` opens a browser window (or navigate to `http://127.0.0.1:5000` yourself) showing the GDS GUI. Confirm:
+- The **Commanding** tab lists every command from your topology (e.g. `cmdDisp.CMD_NO_OP`); send one and confirm it is acknowledged.
+- The **Channels** tab shows live, updating telemetry (e.g. `systemResources.CPU`, or your LED's blink-state channel if you've wired one up).
+- The **Events** tab logs startup events from the board.
+
+### 11b. Moving Toward Flight Operations with YAMCS
+
+**Goal.** Understand when and why to replace `fprime-gds` with [YAMCS](https://yamcs.org/) as your project matures past bring-up/development, and add it to your project via `fprime-yamcs`.
+
+**Rationale.** `fprime-gds`, as used above, is scoped to development and test — a single developer, one session, no persistent operational record. **YAMCS** is a full mission control system: open-source ground data system software that has flown real operational missions, supporting the things an actual mission needs — a persistent telemetry/event archive, parameter alarms, multi-user access, command history, and authored operator displays.
+
+[`fprime-yamcs`](https://github.com/fprime-community/fprime-yamcs) is the bridge between the two worlds: it's a drop-in replacement for `fprime-gds` on the command/telemetry path — it accepts the same communication-adapter flags (`--communication-selection`, `--uart-device`, `--uart-baud`, etc.) — but serves YAMCS instead of the `fprime-gds` GUI, including automatic F´ JSON-dictionary-to-XTCE conversion (the format YAMCS's Mission Database expects) and an F´-flavored severity-colored Events page inside the YAMCS web interface.
+
+**Execution.** Add the `fprime-yamcs` package as a submodule inside the `lib/` directory of your project and then install it:
+```sh
+# In stm32h7-project
+git submodule add https://github.com/fprime-community/fprime-yamcs lib/
+git submodule update --init --recursive
+cd lib/
+pip install fprime-yamcs
+```
+
+Then launch it exactly as you launched `fprime-gds` above, just swapping the command name — every other flag carries over unchanged, since your board doesn't need to know or care which ground tool is on the other end of the UART link:
+
+```sh
+# In stm32h7-project
+fprime-yamcs --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
+```
+
+> [!TIP]
+> Once you're repeating this command often, save its flags in a `fprime-gds.yml` file at your project root (`fprime-yamcs` reads the same config file format as `fprime-gds`) so you can launch with just `fprime-yamcs` going forward. See the [`fprime-yamcs` README](https://github.com/fprime-community/fprime-yamcs#readme) for the full configuration reference, including SDLS encryption and web extensions.
+
+**Verification.** `fprime-yamcs` prints a URL for the YAMCS web interface — by default `http://localhost:8090`. Confirm:
+- Your instance (named after your project) appears, with its Mission Database populated from your dictionary (every command and telemetry channel from your topology).
+- The **Telemetry** page shows live values, the same way the `fprime-gds` Channels tab did.
+- A severity-colored **F´ Events** page is available in the sidebar, and a command sent through the **Commanding** page is acknowledged by the board.
+
+## 12. Conclusion
 
 At this point you have a bootstrapped F´ project wired to the `fprime-stm32`/`fprime-baremetal` bare-metal OSAL, a deployment whose topology and `Main.cpp` run as a cooperative cyclic executive instead of assuming a hosted OS, and a CubeMX-generated HAL kept in sync with the F´ CMake build via `fprime-stm32 sync`. From here, extending the topology — adding components, peripherals, or additional STM32 drivers — follows the same pattern: configure the peripheral in CubeMX, re-run `sync`, and wire the resulting instance into your `.fpp` files as in step 8a.
