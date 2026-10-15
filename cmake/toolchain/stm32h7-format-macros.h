@@ -13,6 +13,9 @@
 #ifndef PRId64
 #define PRId64 "lld"
 #endif
+#ifndef PRIi64
+#define PRIi64 "lli"
+#endif
 #ifndef SCNu8
 #define SCNu8 "hhu"
 #endif
