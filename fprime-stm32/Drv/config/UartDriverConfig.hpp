@@ -11,17 +11,10 @@
 
 namespace Stm32::Stm32UartDriverConfig {
 
-#ifndef FPRIME_STM32_UART_TX_RING_SIZE
-#define FPRIME_STM32_UART_TX_RING_SIZE 4096U
-#endif
-#ifndef FPRIME_STM32_UART_RX_RING_SIZE
-#define FPRIME_STM32_UART_RX_RING_SIZE 4096U
-#endif
-
 // Ring and DMA staging capacities.
-static constexpr FwSizeType TX_RING_SIZE = FPRIME_STM32_UART_TX_RING_SIZE;
+static constexpr FwSizeType TX_RING_SIZE = 4096;
 static constexpr FwSizeType TX_STAGING_SIZE = 1024;
-static constexpr FwSizeType RX_RING_SIZE = FPRIME_STM32_UART_RX_RING_SIZE;
+static constexpr FwSizeType RX_RING_SIZE = 4096;
 static constexpr FwSizeType RX_STAGING_SIZE = 1024;
 
 // Timeout calculation for an 8N1 UART frame.

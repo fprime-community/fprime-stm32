@@ -31,6 +31,4 @@ register_fprime_config(
 
 target_compile_definitions(PlatformStm32f4 INTERFACE
     TGT_OS_TYPE_STM32F4
-    FPRIME_STM32_UART_TX_RING_SIZE=2048
-    FPRIME_STM32_UART_RX_RING_SIZE=2048
 )
