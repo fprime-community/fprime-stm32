@@ -48,7 +48,8 @@ If at any point during this tutorial you encounter issues:
 8. [Creating a Custom STM32 Deployment](#8-creating-a-custom-stm32-deployment)
 9. [Building the Project for STM32](#9-building-the-project-for-stm32)
 10. [Running the Project on STM32](#10-running-the-project-on-stm32)
-11. [Conclusion](#11-conclusion)
+11. [Adapting the Project to Your Own Board](#11-adapting-the-project-to-your-own-board)
+12. [Conclusion](#12-conclusion)
 
 ---
 
@@ -167,7 +168,7 @@ cp -r lib/fprime-stm32/fprime-stm32/Templates/stm32h7/config Stm32h7Project
 Finally, inside your project's `settings.ini` file, make sure to include the path to your `config/` directory so that F´ picks up your custom configuration overrides. Just below the `library_locations:` line add:
 
 ```ini
-config_directory: ./config
+config_directory: ./Stm32h7Project/config
 ```
 
 **Verification.** This ensures that F´ will use your custom configuration settings from the `config/` directory on the next `fprime-util generate`.

@@ -1,6 +1,6 @@
 # fprime-stm32-cli
 
-Wires an STM32CubeMX-generated STM32H7 project into this repo's F' bare-metal
+Wires an STM32CubeMX-generated STM32H7 or STM32F4 project into this repo's F' bare-metal
 `Hardware/` layout: patches the CubeMX linker script and startup assembly
 file for F's zero-dynamic-memory architecture, regenerates
 `Hardware/CMakeLists.txt` so the `FprimeStm32` build target picks up exactly
@@ -22,8 +22,15 @@ Run from the root of an F' deployment project (a directory containing
 `Hardware/`, or containing exactly one `<Deployment>/Hardware/`):
 
 ```bash
-fprime-stm32 sync Hardware/<name>_hal [--dry-run] [--deployment <name>] [--wire-deployment <name>]
+fprime-stm32 sync [Hardware/<name>_hal] [--family auto|stm32h7|stm32f4] [--dry-run] \
+    [--deployment <name>] [--wire-deployment <name>]
 ```
+
+The CubeMX path is optional when `Hardware/` contains exactly one CubeMX
+project. The family is detected from the CubeMX output (startup file name,
+`Drivers/STM32<F4|H7>xx_HAL_Driver`, the `.ioc` `Mcu.Family`, and the chip
+define); `--family` overrides detection, but sync refuses to run if the flag
+contradicts what the files say, or if the files disagree with each other.
 
 `<name>_hal` must be a **direct subdirectory of `Hardware/`** — that's where
 you generate your CubeMX project in the first place (e.g.
@@ -32,10 +39,27 @@ you generate your CubeMX project in the first place (e.g.
 it would touch without writing anything.
 
 `--wire-deployment <name>` picks which `Deployments/<name>/` to connect to
-the stm32h7 platform (see "Deployment build-graph wiring" below) — omit it
+the detected platform (see "Project & deployment build-graph wiring" below) — omit it
 and `sync` auto-detects the deployment if there's exactly one. `--deployment
 <name>` is unrelated: it disambiguates the *namespace* root (the directory
 containing `Hardware/`) when the current directory has more than one.
+
+### Family differences
+
+| Step | STM32H7 | STM32F4 |
+|---|---|---|
+| Linker | Rename regions, retarget `.data/.bss` to AXI SRAM, add `.dtcm_bss`/`.axi_sram` | Raise `_Min_Stack_Size` to 4 KiB, define `_sstack`, mark `.bss`/`._user_heap_stack` NOLOAD (single contiguous SRAM, no remap) |
+| Startup | Zero `.dtcm_bss`, register the bootstrap allocator | Register the bootstrap allocator, `.fpu fpv4-sp-d16`, loop instead of returning from `main` |
+| CMake platform | `stm32h7` / `PlatformStm32h7` | `stm32f4` / `PlatformStm32f4` |
+
+On a first sync, any missing `Hardware/config/` glue (clock init, TIM2
+timebase, `PlatformMemory.hpp`) is copied from
+`fprime-stm32/Templates/<family>/Hardware/config`. Existing files are never
+overwritten. The template clock setup targets the reference boards (F4: NUCLEO-F401RE,
+HSE bypass, 84 MHz; H7: the STM32H753 reference project), so review
+`config/src/<family>_clock.c` for your board's oscillator and PLL settings.
+For F4, also size `FPRIME_STM32_BOOTSTRAP_POOL_SIZE` (32 KiB default in
+`cmake/platform/stm32f4.cmake`) and your topology to the part's SRAM.
 
 ## The CubeMX project requirement
 
@@ -53,7 +77,7 @@ rather than guess.
 you just generated, and (on re-runs) whatever's already in `Hardware/` and
 the rest of the project from a previous sync. Nothing here is chip-specific
 string-matching; every decision is either read out of CubeMX's own
-generated files or keyed off addresses that are fixed in STM32H7 silicon.
+generated files or keyed off addresses that are fixed in each STM32 family's silicon.
 
 ### 1. Discovery (`discovery.py`)
 
@@ -63,8 +87,15 @@ generated files or keyed off addresses that are fixed in STM32H7 silicon.
 - Confirms the CubeMX project path is a direct child of that `Hardware/`
   directory — this is what lets generated paths in `Hardware/CMakeLists.txt`
   be simple relative strings like `stm32h743_hal/Core/Src/gpio.c`.
+- If no CubeMX path was given, picks the single `Hardware/` subdirectory
+  that holds a `.ioc` file or `cmake/stm32cubemx/CMakeLists.txt`; zero or
+  several candidates is an error.
+- Detects the family (`family.py`) from the startup file name, the
+  `Drivers/STM32<F4|H7>xx_HAL_Driver` directory, the `.ioc` `Mcu.Family`
+  and the chip define. `--family` overrides this but must agree with the
+  files; conflicting indicators are an error.
 - Finds the CubeMX-generated linker script (`*FLASH.ld`), startup file
-  (`startup_stm32h7*.s`, in `Core/Startup/` or the project root), and the
+  (`startup_stm32h7*.s` or `startup_stm32f4*.s`, in `Core/Startup/` or the project root), and the
   `cmake/stm32cubemx/CMakeLists.txt` described above. Each lookup fails
   loudly (a clear error, not a guess) if it's missing or ambiguous.
 
@@ -85,9 +116,19 @@ If a linker script has no region at one of these two addresses, the tool
 raises an error instead of patching — that's the chip-compatibility gate,
 see below.
 
+For STM32F4 there is a single SRAM at `0x20000000` (all of it DMA-visible),
+so the tool only requires FLASH and a region at that address, and warns if
+the SRAM is under 64 KiB.
+
 ### 3. Linker script patch (`linker.py`)
 
-Applied as targeted regex substitutions on the original CubeMX text (never a
+**STM32F4:** no region remap is needed. The tool sets `_Min_Stack_Size` to
+at least 4 KiB (keeping a larger value if the script has one), defines
+`_sstack = _estack - _Min_Stack_Size`, and marks `.bss` and
+`._user_heap_stack` NOLOAD. It errors if `_Min_Stack_Size` or those sections
+aren't found.
+
+**STM32H7** (steps 1-5 below): applied as targeted regex substitutions on the original CubeMX text (never a
 full regeneration from a template), so vendor comments/license headers and
 anything the tool doesn't need to touch survive untouched:
 
@@ -121,7 +162,12 @@ anything the tool doesn't need to touch survive untouched:
 
 ### 4. Startup file patch (`startup.py`)
 
-Idempotent (checks for `_sdtcm_bss` first; skips with no changes if already
+**STM32F4:** idempotent (checks for `Stm32_registerBootstrapAllocator`).
+Inserts the allocator call after the `.bss` zero-fill loop, changes
+`.fpu softvfp` to `.fpu fpv4-sp-d16`, and replaces the return from `main`
+with an infinite loop. There is no DTCM, so no `.dtcm_bss` loop.
+
+**STM32H7:** idempotent (checks for `_sdtcm_bss` first; skips with no changes if already
 patched). Inserts, right after the CubeMX-standard `.bss` zero-fill loop and
 before `__libc_init_array`:
 - A zero-fill loop for `.dtcm_bss`, using the same pattern as CubeMX's own
@@ -137,7 +183,8 @@ before `__libc_init_array`:
 `cubemx_cmake.py` parses `<cubemx_project>/cmake/stm32cubemx/CMakeLists.txt`
 — CubeMX's own machine-generated build description — pulling out:
 - the chip define (e.g. `STM32H753xx`), found generically as whichever
-  `MX_Defines_Syms` token matches `STM32\w+` (not hardcoded per chip),
+  `MX_Defines_Syms` token matches `STM32\w+` (not hardcoded per chip); CMake
+  generator expressions such as `$<$<CONFIG:Debug>:DEBUG>` are dropped,
 - HAL driver sources (`STM32_Drivers_Src`) — exactly the HAL modules your
   enabled peripherals need, nothing more,
 - peripheral-init sources (`MX_Application_Src`), minus `main.c`/
@@ -146,18 +193,24 @@ before `__libc_init_array`:
   minus the `*_it.c` file (pulled out separately, see below),
 - include directories (`MX_Include_Dirs`).
 
+Both CubeMX path styles are accepted: `${CMAKE_CURRENT_SOURCE_DIR}/../../`
+and `${CMAKE_SOURCE_DIR}/`.
+
 `hardware_cmake.py` then renders `Hardware/CMakeLists.txt`: the
 `FprimeStm32` static library gets those HAL/peripheral sources (prefixed
 with your HAL directory name) plus whatever hand-written glue files already
 exist under `Hardware/config/src/*.{c,cpp}` (discovered by globbing, not
 assumed to be named anything specific — so your own clock-config/timer glue
-survives every re-sync). It also exports three `CACHE INTERNAL` CMake
+survives every re-sync). Its platform check and link target come from the
+detected family (`stm32h7`/`PlatformStm32h7` or `stm32f4`/`PlatformStm32f4`).
+Missing `Hardware/config/` glue is first copied from the family template
+(see above). It also exports three `CACHE INTERNAL` CMake
 variables:
 
 ```cmake
 FPRIME_STM32_LINKER_SCRIPT    # -> Hardware/linker/<name>.ld
 FPRIME_STM32_STARTUP_SOURCE   # -> Hardware/startup/<name>.s
-FPRIME_STM32_IT_SOURCE        # -> <hal_dir>/Core/Src/stm32h7xx_it.c
+FPRIME_STM32_IT_SOURCE        # -> <hal_dir>/Core/Src/stm32<h7|f4>xx_it.c
 ```
 
 Your deployment's `CMakeLists.txt` references these instead of hardcoding a
@@ -184,10 +237,13 @@ no further changes, reported as "already wired, no changes needed"):
 
 - **The project's root `CMakeLists.txt`** (one directory above the F'
   namespace root): enables the ASM language (needed to compile
-  `Hardware/startup/*.s`) and adds `config/` to the build graph.
+  `Hardware/startup/*.s`), registers the deployment, and adds `config/` to
+  the build graph when `config/` sits next to root rather than in the
+  namespace directory.
 - **The namespace `CMakeLists.txt`** (the one with `add_fprime_subdirectory(Components)`):
-  adds `Hardware/` to the build graph.
-- **The target deployment's `CMakeLists.txt`**: adds `restrict_platforms(stm32h7)`;
+  adds `Hardware/` to the build graph, and `config/` when it lives in the
+  namespace directory (the `fprime-util new` layout).
+- **The target deployment's `CMakeLists.txt`**: adds (or retargets) `restrict_platforms(<detected platform>)`;
   extends `SOURCES` with `${FPRIME_STM32_STARTUP_SOURCE}`/`${FPRIME_STM32_IT_SOURCE}`;
   extends `DEPENDS` with `FprimeStm32`/`FprimeStm32Config`/`FprimeStm32Allocator`/
   `Os_Baremetal_OverrideNewDelete`; appends a `target_link_options(...)` block
@@ -237,12 +293,28 @@ What that claim is and isn't based on:
   `CubeMxCMakeError` and refuses to patch — you get a clear failure, not a
   silently wrong linker script.
 
+## Which STM32F4 chips this works on
+
+Same approach: the tool looks for the SRAM region at `0x20000000` and for
+FLASH in the CubeMX linker script, and derives everything else from
+CubeMX's files. Validated only on the **STM32F401RE** (NUCLEO-F401RE): a
+project synced by the tool builds and links, and the hand-made equivalent
+of those files was flashed and ran. The tool-generated build itself has not
+been flashed yet. Parts with extra RAM regions (e.g. CCM RAM on F405/F407)
+or other linker-script layouts are untested.
+
 ## What stays manual
 
 By design, not by omission:
 - **`SystemClock_Config` / PLL and HSE values** — inherently board-specific
   (depend on your crystal and target `SYSCLK`); regenerate from CubeMX per
   board.
+- **Scaffolded `Hardware/config/` glue** — clock init and the TIM2 timebase
+  are copied from the family template on first sync and target the
+  reference boards (F4: NUCLEO-F401RE, HSE bypass, 84 MHz); review them for
+  your oscillator, PLL and APB timer clock.
+- **Memory sizing** — `FPRIME_STM32_BOOTSTRAP_POOL_SIZE`, queue/stack sizes
+  and the topology must fit the part's RAM.
 - **Peripheral/pin/timer selection in the topology** (`instances.fpp`,
   `topology.fpp`, the deployment's `Topology.cpp`) — this is exactly where
   F' expects hardware customization to live, not inside a generated file.
@@ -257,4 +329,7 @@ pytest
 Fixtures under `tests/fixtures/cubemx_stm32h753/` are literal copies of the
 real raw CubeMX output already in this repo
 (`FprimeStm32BaremetalReference/Hardware/stm32h753_hal/`), including its
-CubeMX-generated `cmake/stm32cubemx/CMakeLists.txt`.
+CubeMX-generated `cmake/stm32cubemx/CMakeLists.txt`. `cubemx_stm32f401/`
+holds the raw CubeMX linker, startup and CMake files of the NUCLEO-F401RE
+project plus a minimal `.ioc`. Tests import from `src/`, so run them with
+`PYTHONPATH=src` unless the package is installed.

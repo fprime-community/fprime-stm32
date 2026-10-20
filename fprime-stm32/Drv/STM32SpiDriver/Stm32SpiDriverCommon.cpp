@@ -72,7 +72,9 @@ Drv::SpiStatus Stm32SpiDriver ::SpiWriteRead_handler(FwIndexType portNum, Fw::Bu
 }
 
 void Stm32SpiDriver ::SpiReadWrite_handler(FwIndexType portNum, Fw::Buffer& writeBuffer, Fw::Buffer& readBuffer) {
+    this->lock();
     (void)this->SpiWriteRead_handler(portNum, writeBuffer, readBuffer);
+    this->unLock();
 }
 
 }  // namespace Stm32

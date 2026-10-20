@@ -115,66 +115,122 @@ void callInstanceInit(Stm32::SpiInstance instance) {
 //! this codebase is already self-contained rather than depending on
 //! another driver's translation unit.
 GPIO_TypeDef* toHalPort(Stm32::GpioPort port) {
+    GPIO_TypeDef* halPort = nullptr;
     switch (port) {
         case Stm32::GpioPort::A:
-            return GPIOA;
+            #if defined(GPIOA)
+            halPort = GPIOA;
+            #endif
+            break;
         case Stm32::GpioPort::B:
-            return GPIOB;
+            #if defined(GPIOB)
+            halPort = GPIOB;
+            #endif
+            break;
         case Stm32::GpioPort::C:
-            return GPIOC;
+            #if defined(GPIOC)
+            halPort = GPIOC;
+            #endif
+            break;
         case Stm32::GpioPort::D:
-            return GPIOD;
+            #if defined(GPIOD)
+            halPort = GPIOD;
+            #endif
+            break;
         case Stm32::GpioPort::E:
-            return GPIOE;
+            #if defined(GPIOE)
+            halPort = GPIOE;
+            #endif
+            break;
         case Stm32::GpioPort::F:
-            return GPIOF;
+            #if defined(GPIOF)
+            halPort = GPIOF;
+            #endif
+            break;
         case Stm32::GpioPort::G:
-            return GPIOG;
+            #if defined(GPIOG)
+            halPort = GPIOG;
+            #endif
+            break;
         case Stm32::GpioPort::H:
-            return GPIOH;
+            #if defined(GPIOH)
+            halPort = GPIOH;
+            #endif
+            break;
         case Stm32::GpioPort::I:
-            return GPIOI;
+            #if defined(GPIOI)
+            halPort = GPIOI;
+            #endif
+            break;
         case Stm32::GpioPort::J:
-            return GPIOJ;
+            #if defined(GPIOJ)
+            halPort = GPIOJ;
+            #endif
+            break;
         case Stm32::GpioPort::K:
-            return GPIOK;
+            #if defined(GPIOK)
+            halPort = GPIOK;
+            #endif
+            break;
         default:
             FW_ASSERT(false, static_cast<FwAssertArgType>(port));
-            return nullptr;
+            break;
     }
+    return halPort;
 }
 
 //! Enable the AHB4 clock for whichever GPIO port is passed in.
 void enableGpioClock(GPIO_TypeDef* port) {
     FW_ASSERT(port != nullptr);
 
+#if defined(GPIOA) && defined(__HAL_RCC_GPIOA_CLK_ENABLE)
     if (port == GPIOA) {
         __HAL_RCC_GPIOA_CLK_ENABLE();
+#endif
+#if defined(GPIOB) && defined(__HAL_RCC_GPIOB_CLK_ENABLE)
     } else if (port == GPIOB) {
         __HAL_RCC_GPIOB_CLK_ENABLE();
+#endif
+#if defined(GPIOC) && defined(__HAL_RCC_GPIOC_CLK_ENABLE)
     } else if (port == GPIOC) {
         __HAL_RCC_GPIOC_CLK_ENABLE();
+        #endif
+#if defined(GPIOD) && defined(__HAL_RCC_GPIOD_CLK_ENABLE)
     } else if (port == GPIOD) {
         __HAL_RCC_GPIOD_CLK_ENABLE();
+        #endif
+#if defined(GPIOE) && defined(__HAL_RCC_GPIOE_CLK_ENABLE)
     } else if (port == GPIOE) {
         __HAL_RCC_GPIOE_CLK_ENABLE();
+        #endif
+#if defined(GPIOF) && defined(__HAL_RCC_GPIOF_CLK_ENABLE)
     } else if (port == GPIOF) {
         __HAL_RCC_GPIOF_CLK_ENABLE();
+        #endif
+#if defined(GPIOG) && defined(__HAL_RCC_GPIOG_CLK_ENABLE)
     } else if (port == GPIOG) {
         __HAL_RCC_GPIOG_CLK_ENABLE();
+        #endif
+#if defined(GPIOH) && defined(__HAL_RCC_GPIOH_CLK_ENABLE)
     } else if (port == GPIOH) {
         __HAL_RCC_GPIOH_CLK_ENABLE();
+        #endif
+#if defined(GPIOI) && defined(__HAL_RCC_GPIOI_CLK_ENABLE)
     } else if (port == GPIOI) {
         __HAL_RCC_GPIOI_CLK_ENABLE();
+        #endif
+#if defined(GPIOJ) && defined(__HAL_RCC_GPIOJ_CLK_ENABLE)
     } else if (port == GPIOJ) {
         __HAL_RCC_GPIOJ_CLK_ENABLE();
+        #endif
+#if defined(GPIOK) && defined(__HAL_RCC_GPIOK_CLK_ENABLE)
     } else if (port == GPIOK) {
         __HAL_RCC_GPIOK_CLK_ENABLE();
+#endif
     } else {
         FW_ASSERT(false, reinterpret_cast<FwAssertArgType>(port));
     }
 }
-
 }  // namespace
 
 namespace {

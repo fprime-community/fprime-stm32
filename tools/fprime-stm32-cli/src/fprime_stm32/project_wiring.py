@@ -34,7 +34,7 @@ target_link_options(${FPRIME_CURRENT_MODULE} PRIVATE
 """
 
 
-def patch_root_cmakelists(text: str) -> tuple[str, list[str]]:
+def patch_root_cmakelists(text: str, add_config: bool = True) -> tuple[str, list[str]]:
     actions = []
     patched = text
 
@@ -46,16 +46,20 @@ def patch_root_cmakelists(text: str) -> tuple[str, list[str]]:
         patched = patched[:insert_at] + "\nenable_language(ASM)" + patched[insert_at:]
         actions.append("Enabled the ASM language (required to compile Hardware/startup/*.s)")
 
-    if _CONFIG_SUBDIR_RE.search(patched) is None:
+    if add_config and _CONFIG_SUBDIR_RE.search(patched) is None:
         patched = patched.rstrip("\n") + '\nadd_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/config")\n'
         actions.append("Added config/ to the project's build graph")
 
     return patched, actions
 
 
-def patch_namespace_cmakelists(text: str) -> tuple[str, list[str]]:
+def patch_namespace_cmakelists(text: str, add_config: bool = False) -> tuple[str, list[str]]:
     actions = []
     patched = text
+
+    if add_config and _CONFIG_SUBDIR_RE.search(patched) is None:
+        patched = patched.rstrip("\n") + '\nadd_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/config")\n'
+        actions.append("Added config/ to the project's build graph")
 
     if _HARDWARE_SUBDIR_RE.search(patched) is None:
         patched = patched.rstrip("\n") + '\nadd_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Hardware")\n'
@@ -120,19 +124,30 @@ def _patch_call_list(text: str, list_re: re.Pattern, insert_line: str) -> tuple[
     return text[: match.end()] + insert_line + text[match.end() :], True
 
 
-def patch_deployment_cmakelists(text: str) -> tuple[str, list[str]]:
+def patch_deployment_cmakelists(text: str, platform: str = "stm32h7") -> tuple[str, list[str]]:
     actions = []
     patched = text
 
-    if _RESTRICT_PLATFORMS_RE.search(patched) is None:
+    existing_restriction = re.search(r"restrict_platforms\(([^)]*)\)", patched)
+    if existing_restriction is not None:
+        if existing_restriction.group(1).split() != [platform]:
+            patched = (
+                patched[: existing_restriction.start()]
+                + f"restrict_platforms({platform})"
+                + patched[existing_restriction.end() :]
+            )
+            actions.append(
+                f"Changed restrict_platforms({existing_restriction.group(1).strip()}) to restrict_platforms({platform})"
+            )
+    else:
         insert_at = 0
         for line in patched.splitlines(keepends=True):
             if line.strip() == "" or line.lstrip().startswith("#"):
                 insert_at += len(line)
             else:
                 break
-        patched = patched[:insert_at] + "restrict_platforms(stm32h7)\n\n" + patched[insert_at:]
-        actions.append("Restricted this deployment to the stm32h7 platform")
+        patched = patched[:insert_at] + f"restrict_platforms({platform})\n\n" + patched[insert_at:]
+        actions.append(f"Restricted this deployment to the {platform} platform")
 
     deployment_match = _REGISTER_DEPLOYMENT_RE.search(patched)
     if deployment_match is None:

@@ -44,42 +44,42 @@ UART_HandleTypeDef* toHalHandle(Stm32::UsartInstance instance) {
     switch (instance) {
         case Stm32::UsartInstance::Usart1:
             #if USART1_UART_INSTANCE
-            return deviceHandle = &huart1;
+            deviceHandle = &huart1;
             #endif
             break;
         case Stm32::UsartInstance::Usart2:
             #if USART2_UART_INSTANCE
-            return deviceHandle = &huart2;
+            deviceHandle = &huart2;
             #endif
             break;
         case Stm32::UsartInstance::Usart3:
             #if USART3_UART_INSTANCE
-            return deviceHandle = &huart3;
+            deviceHandle = &huart3;
             #endif
             break;
         case Stm32::UsartInstance::Uart4:
             #if UART4_INSTANCE
-            return deviceHandle = &huart4;
+            deviceHandle = &huart4;
             #endif
             break;
         case Stm32::UsartInstance::Uart5:
             #if UART5_INSTANCE
-            return deviceHandle = &huart5;
+            deviceHandle = &huart5;
             #endif
             break;
         case Stm32::UsartInstance::Usart6:
             #if USART6_UART_INSTANCE
-            return deviceHandle = &huart6;
+            deviceHandle = &huart6;
             #endif
             break;
         case Stm32::UsartInstance::Uart7:
             #if UART7_INSTANCE
-            return deviceHandle = &huart7;
+            deviceHandle = &huart7;
             #endif
             break;
         case Stm32::UsartInstance::Uart8:
             #if UART8_INSTANCE
-            return deviceHandle = &huart8;
+            deviceHandle = &huart8;
             #endif
             break;
         default:
@@ -92,27 +92,54 @@ UART_HandleTypeDef* toHalHandle(Stm32::UsartInstance instance) {
 
 //! Map a HAL-free UsartInstance to its NVIC interrupt number.
 IRQn_Type toIrqn(Stm32::UsartInstance instance) {
+    IRQn_Type irqn = USART1_IRQn;
     switch (instance) {
         case Stm32::UsartInstance::Usart1:
-            return USART1_IRQn;
+            #if USART1_UART_INSTANCE
+            irqn = USART1_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Usart2:
-            return USART2_IRQn;
+            #if USART2_UART_INSTANCE
+            irqn = USART2_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Usart3:
-            return USART3_IRQn;
+            #if USART3_UART_INSTANCE
+            irqn = USART3_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Uart4:
-            return UART4_IRQn;
+            #if UART4_INSTANCE
+            irqn = UART4_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Uart5:
-            return UART5_IRQn;
+            #if UART5_INSTANCE
+            irqn = UART5_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Usart6:
-            return USART6_IRQn;
+            #if USART6_UART_INSTANCE
+            irqn = USART6_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Uart7:
-            return UART7_IRQn;
+            #if UART7_INSTANCE
+            irqn = UART7_IRQn;
+            #endif
+            break;
         case Stm32::UsartInstance::Uart8:
-            return UART8_IRQn;
+            #if UART8_INSTANCE
+            irqn = UART8_IRQn;
+            #endif
+            break;
         default:
             FW_ASSERT(false, static_cast<FwAssertArgType>(instance));
-            return USART1_IRQn;
+                irqn = USART1_IRQn;
+                break;
     }
+            return irqn;
 }
 
 //! Call the CubeMX-generated init function for the selected instance.
@@ -196,6 +223,10 @@ extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart) {
 
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart, uint16_t Size) {
     FW_ASSERT(huart != nullptr);
+    
+    if (HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT) {
+        return;
+    }
     Stm32::Stm32UartDriver* const component = findUartComponent(huart);
     if (component != nullptr) {
         component->signalRxChunk(Size);

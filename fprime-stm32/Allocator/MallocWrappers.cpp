@@ -34,6 +34,7 @@
 #include <Fw/Types/MemAllocator.hpp>
 
 #include <cstddef>
+#include <reent.h>
 
 extern "C" {
 
@@ -59,6 +60,26 @@ void* __wrap_realloc(void* ptr, std::size_t new_size) {
 
 void __wrap_free(void* ptr) {
     FW_ASSERT(0, static_cast<FwAssertArgType>(reinterpret_cast<PlatformPointerCastType>(ptr)));
+}
+
+void* __wrap__malloc_r(struct _reent* reent, std::size_t size) {
+    (void)reent;
+    return __wrap_malloc(size);
+}
+
+void* __wrap__calloc_r(struct _reent* reent, std::size_t num, std::size_t size) {
+    (void)reent;
+    return __wrap_calloc(num, size);
+}
+
+void* __wrap__realloc_r(struct _reent* reent, void* ptr, std::size_t newSize) {
+    (void)reent;
+    return __wrap_realloc(ptr, newSize);
+}
+
+void __wrap__free_r(struct _reent* reent, void* ptr) {
+    (void)reent;
+    __wrap_free(ptr);
 }
 
 }  // extern "C"
