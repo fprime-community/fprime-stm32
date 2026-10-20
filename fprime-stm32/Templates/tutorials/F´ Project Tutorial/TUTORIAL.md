@@ -890,44 +890,59 @@ which ST-LINK_gdbserver
 which STM32CubeProgrammer
 ```
 
->[!TIP] 
->Remember that you can test your program using the native fprime-gds with:
-> ```shell
-> #In stm32h7-project
-> fprime-gds --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
-> ```
+## 11. Testing your Deployment
 
-## 11. Adapting the Project to Your Own Board
+### 11a. Testing with `fprime-gds`
 
-This tutorial was verified on an STM32H753XIH6 on an STM32H753I-EVAL2 board. Following it step by step works for that board. `fprime-stm32 sync` generalizes the build plumbing (linker script, startup file, HAL sources, CMake wiring) to other STM32H7 and STM32F4 parts, but it cannot know your board's clocks, pins or memory. Work through this checklist for every new board, and confirm each item on hardware.
+**Goal.** Confirm the flashed board is alive and talking to a ground tool, using the same `fprime-gds` developer GDS you'd use for any F´ deployment.
 
-### 11a. Board-specific items you must change
+**Rationale.** `fprime-gds` is an F´-provided development and testing tool: it's how you confirm, as you iterate on hardware and flight software, that commands uplink, telemetry downlinks, and events log correctly. It is **not** intended for flight/mission operations — there's no multi-user access control, command-approval workflow, long-term archive, or operator procedure support. For this tutorial's purposes (bringing up and testing your deployment), it is exactly the right tool.
 
-| Item | Where | What to change |
-|---|---|---|
-| **Clock tree** | CubeMX clock view, `Hardware/config/src/<family>_clock.c` | The template matches the reference board (EVAL2: HSE crystal, 480 MHz PLL). Set the oscillator type (crystal, bypass or internal), PLL dividers, bus prescalers and flash latency for your board. A wrong clock usually shows up as no UART output or a hang in `HAL_RCC_OscConfig`. |
-| **TIM2 timebase** | CubeMX TIM2 prescaler, `Hardware/config/src/tim2_clock.cpp` | The prescaler is `(APB1 timer clock / 1 MHz) - 1` (239 here). Rate groups run off this 1 MHz timer, so a wrong value skews every rate group and timestamp. |
-| **Console UART** | CubeMX USART, DMA streams and pins; `UartDriverConfig.hpp`; `Stm32::UsartInstance` in the topology constants | Use the UART wired to your debug probe's virtual COM port or your GDS link. Enable TX and RX DMA, and match the baud rate, pins and IRQ priorities in `configureTopology()`. |
-| **LED / GPIO** | `gpioDriver.open(...)` in `configureTopology()` | Change the port and pin to a real LED on your board. |
-| **Memory budget** | `config/` overrides, `FPRIME_STM32_BOOTSTRAP_POOL_SIZE` in `lib/fprime-stm32/cmake/platform/<family>.cmake`, `QUEUE_SIZE`/`STACK_SIZE` in `instances.fpp` | The defaults assume about 1 MB of RAM (H7: 128 KiB pool). On smaller parts, shrink the pool, queue depths, hash buckets and buffer sizes until `arm-none-eabi-size` shows `data + bss` comfortably inside RAM with room for the stack. `fprime-stm32 sync` warns when RAM is under 64 KiB (F4) or the AXI SRAM is under 128 KiB (H7). |
-| **Topology contents** | `topology.fpp`, `instances.fpp` | Keep only components the board can support. Components that read a filesystem or OS state (`SystemResources`, `PrmDb`, file handling) need the MicroFs setup from step 8a in `configureTopology()`. If you leave MicroFs out, remove those components. Otherwise the first rate-group cycle that calls them hits a `FW_ASSERT` and ends in `FatalHandler`. |
-| **Flash/debug config** | `launch.json` | Set `device` to your part, point `executable` at your deployment's ELF, and use your probe's server (ST-LINK GDB server or OpenOCD with `target/stm32<family>x.cfg`). |
+**Execution.** With your virtual environment activated and the board flashed and running (step 10), launch `fprime-gds` pointed at the UART device your board enumerates as (commonly `/dev/ttyACM0` on Linux; check `dmesg` or your OS's device manager if unsure) and the dictionary your build in step 9 produced:
 
-### 11b. Choosing the family
+```shell
+# In stm32h7-project
+fprime-gds --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
+```
 
-`fprime-stm32 sync` detects the family from the CubeMX project (startup file, `Drivers/STM32<F4|H7>xx_HAL_Driver`, the `.ioc` and the chip define). Pass `--family stm32h7` or `--family stm32f4` to force it. The two differ as follows:
+`--no-app` tells `fprime-gds` not to launch a deployment binary itself — the binary is already running on the board, not on your host — and `--communication-selection uart` with the matching `--uart-device`/`--uart-baud` (115200, matching the USART1 configuration from step 7) tells it how to reach the board instead of the default TCP/IP transport.
 
-- **STM32H7:** as in this tutorial. The tool splits RAM between AXI SRAM (DMA-safe buffers, `.data`, `.bss`) and DTCM (stacks, CPU-only state). `Main.cpp` enables the I/D caches.
-- **STM32F4:** one contiguous SRAM and no caches, so the tool only enlarges the stack, marks `.bss` as NOLOAD and registers the allocator in the startup file. Copy `Templates/stm32f4` instead of `Templates/stm32h7` in steps 4 and 5. Build with `fprime-util generate stm32f4`. In `Main.cpp`, drop the `SCB_Enable*Cache()` calls and include `stm32f4_clock.h` and `stm32f4xx_hal.h`. F4 parts have 96-256 KB of RAM, so expect to cut the topology and buffers much further than the H7 template does.
+**Verification.** `fprime-gds` opens a browser window (or navigate to `http://127.0.0.1:5000` yourself) showing the GDS GUI. Confirm:
+- The **Commanding** tab lists every command from your topology (e.g. `cmdDisp.CMD_NO_OP`); send one and confirm it is acknowledged.
+- The **Channels** tab shows live, updating telemetry (e.g. `systemResources.CPU`, or your LED's blink-state channel if you've wired one up).
+- The **Events** tab logs startup events from the board.
 
-Only the STM32H753 (EVAL2) and the STM32F401RE (NUCLEO-F401RE) have been exercised on real hardware. Other parts in these families are expected to work through the same flow but are untested. If `sync` rejects a linker script it does not recognize, it stops with an error instead of guessing.
+### 11b. Moving Toward Flight Operations with YAMCS
 
-### 11c. Bring-up checklist
+**Goal.** Understand when and why to replace `fprime-gds` with [YAMCS](https://yamcs.org/) as your project matures past bring-up/development, and add it to your project via `fprime-yamcs`.
 
-1. Build, then check the footprint: `arm-none-eabi-size <deployment ELF>`. `data + bss` must fit in RAM with margin for the stack, and `text` must fit in flash.
-2. Flash and run under the debugger with breakpoints on `HardFault_Handler`, `Fw::Logger::log` (an assertion fired) and `Svc::FatalHandler::FatalReceive_handler`.
-3. Halt after a few seconds and confirm that `Deployments::timer.m_tickCount` and `Deployments::rateGroup_1Hz.m_cycles` are advancing and that `Deployments::timer.m_overrunCount` is 0.
-4. Connect `fprime-gds` over the UART (step 10). Seeing events and telemetry means the clock, UART and DMA configuration are all correct.
+**Rationale.** `fprime-gds`, as used above, is scoped to development and test — a single developer, one session, no persistent operational record. **YAMCS** is a full mission control system: open-source ground data system software that has flown real operational missions, supporting the things an actual mission needs — a persistent telemetry/event archive, parameter alarms, multi-user access, command history, and authored operator displays.
+
+[`fprime-yamcs`](https://github.com/fprime-community/fprime-yamcs) is the bridge between the two worlds: it's a drop-in replacement for `fprime-gds` on the command/telemetry path — it accepts the same communication-adapter flags (`--communication-selection`, `--uart-device`, `--uart-baud`, etc.) — but serves YAMCS instead of the `fprime-gds` GUI, including automatic F´ JSON-dictionary-to-XTCE conversion (the format YAMCS's Mission Database expects) and an F´-flavored severity-colored Events page inside the YAMCS web interface.
+
+**Execution.** Add the `fprime-yamcs` package as a submodule inside the `lib/` directory of your project and then install it:
+```sh
+# In stm32h7-project
+git submodule add https://github.com/fprime-community/fprime-yamcs lib/
+git submodule update --init --recursive
+cd lib/
+pip install fprime-yamcs
+```
+
+Then launch it exactly as you launched `fprime-gds` above, just swapping the command name — every other flag carries over unchanged, since your board doesn't need to know or care which ground tool is on the other end of the UART link:
+
+```sh
+# In stm32h7-project
+fprime-yamcs --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
+```
+
+> [!TIP]
+> Once you're repeating this command often, save its flags in a `fprime-gds.yml` file at your project root (`fprime-yamcs` reads the same config file format as `fprime-gds`) so you can launch with just `fprime-yamcs` going forward. See the [`fprime-yamcs` README](https://github.com/fprime-community/fprime-yamcs#readme) for the full configuration reference, including SDLS encryption and web extensions.
+
+**Verification.** `fprime-yamcs` prints a URL for the YAMCS web interface — by default `http://localhost:8090`. Confirm:
+- Your instance (named after your project) appears, with its Mission Database populated from your dictionary (every command and telemetry channel from your topology).
+- The **Telemetry** page shows live values, the same way the `fprime-gds` Channels tab did.
+- A severity-colored **F´ Events** page is available in the sidebar, and a command sent through the **Commanding** page is acknowledged by the board.
 
 ## 12. Conclusion
 
