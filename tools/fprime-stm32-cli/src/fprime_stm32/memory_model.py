@@ -3,10 +3,13 @@ from dataclasses import dataclass
 
 from fprime_stm32.errors import LinkerScriptError
 
-# H7 memory map is fixed by silicon, regardless of what CubeMX names the region.
+# Memory maps are fixed by silicon, regardless of what CubeMX names the regions.
 AXI_SRAM_ORIGIN = 0x24000000
 DTCM_RAM_ORIGIN = 0x20000000
 MIN_AXI_SRAM_BYTES = 128 * 1024
+
+F4_SRAM_ORIGIN = 0x20000000
+MIN_F4_SRAM_BYTES = 64 * 1024
 
 _MEMORY_BLOCK_RE = re.compile(r"MEMORY\s*\{(?P<body>.*?)\}", re.DOTALL)
 _REGION_LINE_RE = re.compile(
@@ -31,9 +34,10 @@ class MemoryRegion:
 class MemoryMap:
     regions: list[MemoryRegion]
     flash: MemoryRegion
-    dtcm: MemoryRegion
-    axi_sram: MemoryRegion
     warnings: list[str]
+    dtcm: MemoryRegion | None = None  # H7 only
+    axi_sram: MemoryRegion | None = None  # H7 only
+    ram: MemoryRegion | None = None  # F4: the single contiguous SRAM
 
     def region_named(self, name: str) -> MemoryRegion | None:
         for region in self.regions:
@@ -42,7 +46,7 @@ class MemoryMap:
         return None
 
 
-def parse_memory_block(linker_text: str) -> MemoryMap:
+def parse_memory_block(linker_text: str, family: str = "stm32h7") -> MemoryMap:
     block = _MEMORY_BLOCK_RE.search(linker_text)
     if block is None:
         raise LinkerScriptError("No MEMORY { ... } block found in linker script")
@@ -64,11 +68,27 @@ def parse_memory_block(linker_text: str) -> MemoryMap:
         raise LinkerScriptError("MEMORY block found but no memory regions could be parsed from it")
 
     flash = next((r for r in regions if r.name.upper().startswith("FLASH")), None)
-    dtcm = next((r for r in regions if r.origin == DTCM_RAM_ORIGIN), None)
-    axi_sram = next((r for r in regions if r.origin == AXI_SRAM_ORIGIN), None)
-
     if flash is None:
         raise LinkerScriptError("MEMORY block has no FLASH region")
+
+    if family == "stm32f4":
+        ram = next((r for r in regions if r.origin == F4_SRAM_ORIGIN), None)
+        if ram is None:
+            raise LinkerScriptError(
+                f"MEMORY block has no region at SRAM origin 0x{F4_SRAM_ORIGIN:08X} "
+                "(not an STM32F4 CubeMX linker script?)"
+            )
+        warnings = []
+        if ram.length_bytes < MIN_F4_SRAM_BYTES:
+            warnings.append(
+                f"SRAM region is only {ram.length_bytes // 1024} KiB, below the "
+                f"{MIN_F4_SRAM_BYTES // 1024} KiB comfortable F' bare-metal minimum; "
+                "shrink FPRIME_STM32_BOOTSTRAP_POOL_SIZE and the topology to fit"
+            )
+        return MemoryMap(regions=regions, flash=flash, warnings=warnings, ram=ram)
+
+    dtcm = next((r for r in regions if r.origin == DTCM_RAM_ORIGIN), None)
+    axi_sram = next((r for r in regions if r.origin == AXI_SRAM_ORIGIN), None)
     if dtcm is None:
         raise LinkerScriptError(
             f"MEMORY block has no region at DTCM RAM origin 0x{DTCM_RAM_ORIGIN:08X} "
@@ -88,4 +108,4 @@ def parse_memory_block(linker_text: str) -> MemoryMap:
             "(Fw::Buffer pools / BootstrapAllocator heap may not fit)"
         )
 
-    return MemoryMap(regions=regions, flash=flash, dtcm=dtcm, axi_sram=axi_sram, warnings=warnings)
+    return MemoryMap(regions=regions, flash=flash, warnings=warnings, dtcm=dtcm, axi_sram=axi_sram)

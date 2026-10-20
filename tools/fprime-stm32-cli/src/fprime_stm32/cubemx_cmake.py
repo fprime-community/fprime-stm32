@@ -3,7 +3,8 @@ from dataclasses import dataclass
 
 from fprime_stm32.errors import CubeMxCMakeError
 
-_PATH_PREFIX = "${CMAKE_CURRENT_SOURCE_DIR}/../../"
+# CubeMX emits either ${CMAKE_CURRENT_SOURCE_DIR}/../../ (older) or ${CMAKE_SOURCE_DIR}/ (newer).
+_PATH_PREFIX_RE = re.compile(r"^\$\{CMAKE_(?:CURRENT_)?SOURCE_DIR\}/(?:\.\./\.\./)?")
 
 _EXCLUDED_APPLICATION_BASENAMES = {"main.c", "sysmem.c", "syscalls.c"}
 
@@ -34,13 +35,12 @@ def _extract_tokens(text: str, var_name: str) -> list[str]:
 
 
 def _strip_path_prefix(token: str) -> str:
-    if token.startswith(_PATH_PREFIX):
-        return token[len(_PATH_PREFIX) :]
-    return token
+    return _PATH_PREFIX_RE.sub("", token)
 
 
 def parse_cubemx_cmake(text: str) -> CubeMxCMakeInfo:
-    all_defines = _extract_tokens(text, "MX_Defines_Syms")
+    # Drop CMake generator expressions (e.g. $<$<CONFIG:Debug>:DEBUG>): F' picks its own build type.
+    all_defines = [t for t in _extract_tokens(text, "MX_Defines_Syms") if not t.startswith("$<")]
     include_dirs = [_strip_path_prefix(t) for t in _extract_tokens(text, "MX_Include_Dirs")]
     application_tokens = [_strip_path_prefix(t) for t in _extract_tokens(text, "MX_Application_Src")]
     driver_sources = [_strip_path_prefix(t) for t in _extract_tokens(text, "STM32_Drivers_Src")]

@@ -48,7 +48,8 @@ If at any point during this tutorial you encounter issues:
 8. [Creating a Custom STM32 Deployment](#8-creating-a-custom-stm32-deployment)
 9. [Building the Project for STM32](#9-building-the-project-for-stm32)
 10. [Running the Project on STM32](#10-running-the-project-on-stm32)
-11. [Conclusion](#11-conclusion)
+11. [Adapting the Project to Your Own Board](#11-adapting-the-project-to-your-own-board)
+12. [Conclusion](#12-conclusion)
 
 ---
 
@@ -167,7 +168,7 @@ cp -r lib/fprime-stm32/fprime-stm32/Templates/stm32h7/config Stm32h7Project
 Finally, inside your project's `settings.ini` file, make sure to include the path to your `config/` directory so that F´ picks up your custom configuration overrides. Just below the `library_locations:` line add:
 
 ```ini
-config_directory: ./config
+config_directory: ./Stm32h7Project/config
 ```
 
 **Verification.** This ensures that F´ will use your custom configuration settings from the `config/` directory on the next `fprime-util generate`.
@@ -896,6 +897,38 @@ which STM32CubeProgrammer
 > fprime-gds --dictionary build-artifacts/stm32h7/Stm32h7Project_Deployments_Stm32h7Deployment/dict/Stm32h7Project_Deployments_Stm32h7DeploymentTopologyDictionary.json --communication-selection uart --uart-device /dev/ttyACM0 --uart-baud 115200 --no-app
 > ```
 
-## 11. Conclusion
+## 11. Adapting the Project to Your Own Board
+
+This tutorial was verified on an STM32H753XIH6 on an STM32H753I-EVAL2 board. Following it step by step works for that board. `fprime-stm32 sync` generalizes the build plumbing (linker script, startup file, HAL sources, CMake wiring) to other STM32H7 and STM32F4 parts, but it cannot know your board's clocks, pins or memory. Work through this checklist for every new board, and confirm each item on hardware.
+
+### 11a. Board-specific items you must change
+
+| Item | Where | What to change |
+|---|---|---|
+| **Clock tree** | CubeMX clock view, `Hardware/config/src/<family>_clock.c` | The template matches the reference board (EVAL2: HSE crystal, 480 MHz PLL). Set the oscillator type (crystal, bypass or internal), PLL dividers, bus prescalers and flash latency for your board. A wrong clock usually shows up as no UART output or a hang in `HAL_RCC_OscConfig`. |
+| **TIM2 timebase** | CubeMX TIM2 prescaler, `Hardware/config/src/tim2_clock.cpp` | The prescaler is `(APB1 timer clock / 1 MHz) - 1` (239 here). Rate groups run off this 1 MHz timer, so a wrong value skews every rate group and timestamp. |
+| **Console UART** | CubeMX USART, DMA streams and pins; `UartDriverConfig.hpp`; `Stm32::UsartInstance` in the topology constants | Use the UART wired to your debug probe's virtual COM port or your GDS link. Enable TX and RX DMA, and match the baud rate, pins and IRQ priorities in `configureTopology()`. |
+| **LED / GPIO** | `gpioDriver.open(...)` in `configureTopology()` | Change the port and pin to a real LED on your board. |
+| **Memory budget** | `config/` overrides, `FPRIME_STM32_BOOTSTRAP_POOL_SIZE` in `lib/fprime-stm32/cmake/platform/<family>.cmake`, `QUEUE_SIZE`/`STACK_SIZE` in `instances.fpp` | The defaults assume about 1 MB of RAM (H7: 128 KiB pool). On smaller parts, shrink the pool, queue depths, hash buckets and buffer sizes until `arm-none-eabi-size` shows `data + bss` comfortably inside RAM with room for the stack. `fprime-stm32 sync` warns when RAM is under 64 KiB (F4) or the AXI SRAM is under 128 KiB (H7). |
+| **Topology contents** | `topology.fpp`, `instances.fpp` | Keep only components the board can support. Components that read a filesystem or OS state (`SystemResources`, `PrmDb`, file handling) need the MicroFs setup from step 8a in `configureTopology()`. If you leave MicroFs out, remove those components. Otherwise the first rate-group cycle that calls them hits a `FW_ASSERT` and ends in `FatalHandler`. |
+| **Flash/debug config** | `launch.json` | Set `device` to your part, point `executable` at your deployment's ELF, and use your probe's server (ST-LINK GDB server or OpenOCD with `target/stm32<family>x.cfg`). |
+
+### 11b. Choosing the family
+
+`fprime-stm32 sync` detects the family from the CubeMX project (startup file, `Drivers/STM32<F4|H7>xx_HAL_Driver`, the `.ioc` and the chip define). Pass `--family stm32h7` or `--family stm32f4` to force it. The two differ as follows:
+
+- **STM32H7:** as in this tutorial. The tool splits RAM between AXI SRAM (DMA-safe buffers, `.data`, `.bss`) and DTCM (stacks, CPU-only state). `Main.cpp` enables the I/D caches.
+- **STM32F4:** one contiguous SRAM and no caches, so the tool only enlarges the stack, marks `.bss` as NOLOAD and registers the allocator in the startup file. Copy `Templates/stm32f4` instead of `Templates/stm32h7` in steps 4 and 5. Build with `fprime-util generate stm32f4`. In `Main.cpp`, drop the `SCB_Enable*Cache()` calls and include `stm32f4_clock.h` and `stm32f4xx_hal.h`. F4 parts have 96-256 KB of RAM, so expect to cut the topology and buffers much further than the H7 template does.
+
+Only the STM32H753 (EVAL2) and the STM32F401RE (NUCLEO-F401RE) have been exercised on real hardware. Other parts in these families are expected to work through the same flow but are untested. If `sync` rejects a linker script it does not recognize, it stops with an error instead of guessing.
+
+### 11c. Bring-up checklist
+
+1. Build, then check the footprint: `arm-none-eabi-size <deployment ELF>`. `data + bss` must fit in RAM with margin for the stack, and `text` must fit in flash.
+2. Flash and run under the debugger with breakpoints on `HardFault_Handler`, `Fw::Logger::log` (an assertion fired) and `Svc::FatalHandler::FatalReceive_handler`.
+3. Halt after a few seconds and confirm that `Deployments::timer.m_tickCount` and `Deployments::rateGroup_1Hz.m_cycles` are advancing and that `Deployments::timer.m_overrunCount` is 0.
+4. Connect `fprime-gds` over the UART (step 10). Seeing events and telemetry means the clock, UART and DMA configuration are all correct.
+
+## 12. Conclusion
 
 At this point you have a bootstrapped F´ project wired to the `fprime-stm32`/`fprime-baremetal` bare-metal OSAL, a deployment whose topology and `Main.cpp` run as a cooperative cyclic executive instead of assuming a hosted OS, and a CubeMX-generated HAL kept in sync with the F´ CMake build via `fprime-stm32 sync`. From here, extending the topology — adding components, peripherals, or additional STM32 drivers — follows the same pattern: configure the peripheral in CubeMX, re-run `sync`, and wire the resulting instance into your `.fpp` files as in step 8a.

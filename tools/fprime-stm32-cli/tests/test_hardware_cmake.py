@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fprime_stm32.cubemx_cmake import parse_cubemx_cmake
+from fprime_stm32.family import get_family
 from fprime_stm32.hardware_cmake import discover_extra_config_sources, render_hardware_cmakelists
 
 CMAKE_FIXTURE = Path(__file__).parent / "fixtures" / "cubemx_stm32h753" / "cmake" / "stm32cubemx" / "CMakeLists.txt"
@@ -15,6 +16,7 @@ def _render(hardware_dir, extra_config_sources=()):
         startup_out_name="startup_stm32h743xx.s",
         extra_config_sources=list(extra_config_sources),
         hardware_dir=hardware_dir,
+        family=get_family("stm32h7"),
     )
 
 
@@ -66,3 +68,22 @@ def test_discover_extra_config_sources(tmp_path):
         "config/src/stm32h7_clock.c",
         "config/src/tim2_clock.cpp",
     ]
+
+
+def test_f4_template_uses_f4_platform(tmp_path):
+    f4_fixture = Path(__file__).parent / "fixtures" / "cubemx_stm32f401" / "cmake" / "stm32cubemx" / "CMakeLists.txt"
+    text = render_hardware_cmakelists(
+        hal_dir_name="stm32f401_hal",
+        info=parse_cubemx_cmake(f4_fixture.read_text()),
+        linker_out_name="STM32F401XX_FLASH.ld",
+        startup_out_name="startup_stm32f401xe.s",
+        extra_config_sources=[],
+        hardware_dir=tmp_path,
+        family=get_family("stm32f4"),
+    )
+    assert 'FPRIME_PLATFORM STREQUAL "stm32f4"' in text
+    assert "PlatformStm32f4" in text
+    assert "STM32F401xE" in text
+    assert "$<" not in text
+    assert "stm32f401_hal/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c" in text
+    assert "stm32f401_hal/Core/Src/system_stm32f4xx.c" in text
