@@ -12,10 +12,11 @@
 
 // Injectable stub state for unit tests
 extern bool Stub_hwOpenSucceeds = true;               // simulates MX_SPIn_Init()
-extern I32 Stub_hwTransmitReceiveStatus = 0;           // HAL_StatusTypeDef hwTransmitReceive() reports (0 == HAL_OK)
-extern U8 Stub_rxResponseData[32] = {0};               // bytes hwTransmitReceive() copies into the caller's read buffer
-extern bool Stub_dmaCompletes = true;      // DMA mode only: simulates HAL_SPI_TxRxCpltCallback() firing before the timeout
-extern I32 Stub_dmaTimeoutStatus = 3;      // DMA mode only, when Stub_dmaCompletes is false: mirrors real HAL_TIMEOUT (3)
+extern I32 Stub_hwTransmitReceiveStatus = 0;          // HAL_StatusTypeDef hwTransmitReceive() reports (0 == HAL_OK)
+extern U8 Stub_rxResponseData[32] = {0};          // bytes hwTransmitReceive() copies into the caller's read buffer
+extern I32 Stub_hwStartAsyncTransferStatus = 0;       // HAL_StatusTypeDef hwStartAsyncTransfer() reports (0 == HAL_OK)
+extern bool Stub_hwAbortAsyncTransferCalled = false;  // observable: true after hwAbortAsyncTransfer() runs
+extern bool Stub_hwFinishAsyncTransferCalled = false; // observable: true after hwFinishAsyncTransfer() runs
 
 // Observable stub state for unit tests
 extern Stm32::SpiInstance Stub_lastOpenedInstance = Stm32::SpiInstance::Spi5;  // instance most recently passed to open()
@@ -78,19 +79,41 @@ I32 Stm32SpiDriver ::hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType 
     }
     Stub_lastTxLen = size;
 
-    // DMA mode only: simulate the completion ISR never firing, mirroring the
-    // real hwTransmitReceive()'s watchdog-timeout return without an actual
-    // wall-clock wait on the host.
-    if ((this->m_transferMode == TransferMode::DMA) && !Stub_dmaCompletes) {
-        return Stub_dmaTimeoutStatus;
-    }
-
     const FwSizeType toCopy = (size < sizeof(Stub_rxResponseData)) ? size : sizeof(Stub_rxResponseData);
     for (FwSizeType i = 0; i < toCopy; i++) {
         rxData[i] = Stub_rxResponseData[i];
     }
 
     return Stub_hwTransmitReceiveStatus;
+}
+
+I32 Stm32SpiDriver ::hwStartAsyncTransfer(const U8* txData, U8* rxData, FwSizeType size) {
+    Stub_csActiveDuringTransfer = s_csActive;
+
+    const FwSizeType captured = (size < sizeof(Stub_lastTxData)) ? size : sizeof(Stub_lastTxData);
+    for (FwSizeType i = 0; i < captured; i++) {
+        Stub_lastTxData[i] = txData[i];
+    }
+    Stub_lastTxLen = size;
+
+    if (Stub_hwStartAsyncTransferStatus == 0) {
+        const FwSizeType toCopy = (size < sizeof(Stub_rxResponseData)) ? size : sizeof(Stub_rxResponseData);
+        for (FwSizeType i = 0; i < toCopy; i++) {
+            rxData[i] = Stub_rxResponseData[i];
+        }
+    }
+
+    return Stub_hwStartAsyncTransferStatus;
+}
+
+void Stm32SpiDriver ::hwAbortAsyncTransfer() {
+    Stub_hwAbortAsyncTransferCalled = true;
+}
+
+void Stm32SpiDriver ::hwFinishAsyncTransfer(U8* rxData, FwSizeType size) {
+    (void)rxData;
+    (void)size;
+    Stub_hwFinishAsyncTransferCalled = true;
 }
 
 }  // namespace Stm32
