@@ -295,37 +295,50 @@ still required.
 
 `Stm32::Stm32I2cDriver` implements the framework's `Drv.I2c` interface
 (guarded, synchronous `write`/`read`/`writeRead` ports, each returning
-`Drv::I2cStatus` directly) against I2C1 on PB6/PB7 (SCL/SDA). Unlike
-`Stm32UartDriver`, it is deliberately blocking/polled, not interrupt-driven:
-`HAL_I2C_MspInit()` only enables the peripheral clock/GPIO, no NVIC
-event/error interrupt is armed, and every `HAL_I2C_Master_Transmit`/`_Receive`
-call is bounded by a fixed 10 ms watchdog passed as the HAL's own `Timeout`
-parameter. This is a deliberate choice, not a shortcut: `Drv.I2c` is a
-synchronous contract (the same one `Drv::LinuxI2cDriver` implements by
-blocking on `ioctl`), the cyclic executive has no thread to free up by not
-blocking, and a real I2C transaction at 400 kHz is sub-millisecond. Interrupts
-would only earn their complexity back for `writeRead`'s one real limitation:
-it is two back-to-back blocking calls (STOP then START), not a single
-electrically-held repeated START, which is safe on this single-master bus but
-would need the sequential IT/DMA API (with I2C1's NVIC interrupt enabled) for
-a sensor that strictly requires the bus held across the register-address
-write.
+`Drv::I2cStatus` directly) against I2C1 on PB6/PB7 (SCL/SDA). Each instance
+is opened in one `Stm32::TransferMode`, chosen per-instance at `open()`:
 
-`open(instance, busSpeed)` selects both the peripheral (`I2cInstance::I2c1`
+- **`POLLED`** (the default): every `HAL_I2C_Master_Transmit`/`_Receive` call
+  is a single blocking HAL call, bounded by a fixed 10 ms watchdog passed as
+  the HAL's own `Timeout` parameter. This is the right choice for a small,
+  low-rate sensor like the MPU-6050 — a real I2C transaction at 400 kHz is
+  sub-millisecond, and the cyclic executive has no thread to free up by not
+  blocking.
+- **`DMA`**: `write`/`read`/`writeRead` are not served; the instance instead
+  serves `writeAsync`/`readAsync`/`writeReadAsync` — a request starts the
+  matching `HAL_I2C_Master_*_DMA()` call and returns immediately, and `poll()`
+  (called every cyclic-executive pass in `Main.cpp`) drains the ISR-latched
+  completion and invokes the matching `*AsyncComplete` port. This is the
+  right choice for anything that must not block the executive while a
+  transaction is in flight.
+
+`writeRead`/`writeReadAsync` share one real limitation: each is two
+back-to-back DMA/blocking calls (STOP then START), not a single
+electrically-held repeated START. This is safe on this single-master bus
+(nothing else can interrupt the sequence) but will not work for a sensor that
+strictly requires the bus held across the register-address write (loses its
+internal pointer on STOP) — that would need the sequential IT/DMA API with
+a held repeated START, not yet implemented here.
+
+`open(instance, busSpeed, mode)` selects the peripheral (`I2cInstance::I2c1`
 today; `I2c2`/`I2c3`/`I2c4` are declared for other boards but not yet
-CubeMX-configured) and a bus speed preset (`I2cBusSpeed::Standard`/`Fast`/
+CubeMX-configured), a bus speed preset (`I2cBusSpeed::Standard`/`Fast`/
 `FastPlus` — CubeMX-computed `Timing` register values for this project's
 actual D2PCLK1 clock, since the H7 I2C peripheral has no runtime baud-rate
-formula the way UART does). It follows the same `Common`/`Real`/`Stub` HAL
-boundary convention described below, with one variant: `open()` itself is
-implemented directly in `Stm32I2cDriver.cpp`/`Stm32I2cDriverStub.cpp` rather
-than delegating to a private `hwOpen()`, since (unlike UART's DMA/ISR setup)
-there's no separate hardware-independent work for a shared `Common.cpp` to do
-around it.
+formula the way UART does), and the transfer mode (default `POLLED`). It
+follows the same `Common`/`Real`/`Stub` HAL boundary convention described
+below, with one variant: `open()` itself is implemented directly in
+`Stm32I2cDriver.cpp`/`Stm32I2cDriverStub.cpp` rather than delegating to a
+private `hwOpen()`. See [`Stm32I2cDriver`'s own
+`docs/sdd.md`](Drv/STM32I2cDriver/docs/sdd.md) for the full async/`poll()`
+design and its known DMA limitation (I2C1's current CubeMX config has no DMA
+request attached, so `DMA` mode asserts rather than running until that's
+regenerated).
 
-Validated live against a real MPU-6050 IMU (wake-up register write, then
-repeated 14-byte accel/gyro/temp reads) — see "Adding a sensor" below for how
-that's wired without any application code touching the I2C bus directly.
+Validated live against a real MPU-6050 IMU in `POLLED` mode (wake-up register
+write, then repeated 14-byte accel/gyro/temp reads) — see "Adding a sensor"
+below for how that's wired without any application code touching the I2C bus
+directly.
 
 ### Adding a sensor
 
@@ -367,12 +380,21 @@ matching `*Ac.hpp` headers when the library isn't registered through
 `Stm32::Stm32SpiDriver` implements the framework's `Drv.Spi` interface
 (guarded `SpiWriteRead`, returning `Drv::SpiStatus`, plus the deprecated
 void-returning `SpiReadWrite`) against SPI5 on PF6/PF7/PF8/PF9
-(NSS/SCK/MISO/MOSI). Like `Stm32I2cDriver`, it is deliberately blocking/
-polled with no DMA and no interrupts: sensor payloads on this bus (6-8 bytes
-for the BMP280) are small enough that a single blocking
-`HAL_SPI_TransmitReceive()` call is simpler and cheaper than setting up
-DMA-safe AXI SRAM buffers and Cortex-M7 D-cache maintenance for a transfer
-that's over before either would matter.
+(NSS/SCK/MISO/MOSI). Each instance is opened in one `Stm32::TransferMode`,
+chosen per-instance at `open()`, mirroring `Stm32I2cDriver`:
+
+- **`POLLED`** (the default): `SpiWriteRead`/`SpiReadWrite` perform a single
+  blocking `HAL_SPI_TransmitReceive()` call. Sensor payloads on this bus (6-8
+  bytes for the BMP280) are small enough that this is simpler and cheaper
+  than setting up DMA-safe AXI SRAM buffers and Cortex-M7 D-cache maintenance
+  for a transfer that's over before either would matter.
+- **`DMA`**: `SpiWriteRead`/`SpiReadWrite` are not served; the instance
+  instead serves `spiWriteReadAsync` — a request starts
+  `HAL_SPI_TransmitReceive_DMA()` and returns immediately, and `poll()`
+  (called every cyclic-executive pass in `Main.cpp`) drains the ISR-latched
+  completion and invokes `spiWriteReadAsyncComplete`. This is the right
+  choice for anything that must not block the executive while a transfer is
+  in flight (e.g. bulk flash access on a different SPI instance, or a radio).
 
 SPI5 is configured `NSS_SOFT` in this project's CubeMX setup — the HAL never
 drives a chip-select pin on its own — so this driver owns the CS GPIO
@@ -390,21 +412,24 @@ deliberate, not incidental: a BMP280 and any future SPI sensor on a
 different bus or chip-select need two simultaneously-open `Stm32SpiDriver`
 instances that never share mutable state.
 
-`open(instance, csPort, csPin, timeoutMs)` selects the peripheral
+`open(instance, csPort, csPin, timeoutMs, mode)` selects the peripheral
 (`SpiInstance::Spi5` today; `Spi1`-`Spi4`/`Spi6` are declared for other
 boards but not yet CubeMX-configured), the chip-select pin using the same
-`Stm32::GpioPort` vocabulary `Stm32GpioDriver::open()` uses, and a
+`Stm32::GpioPort` vocabulary `Stm32GpioDriver::open()` uses, a
 per-transaction watchdog (default 10 ms, matching `Stm32I2cDriver`'s
-convention). It follows the same `Common`/`Real`/`Stub` HAL boundary
-convention as every other driver here — see
-[`Stm32SpiDriver`'s own `docs/sdd.md`](Drv/STM32SpiDriver/docs/sdd.md) for
-the full design.
+convention), and the transfer mode (default `POLLED`). It follows the same
+`Common`/`Real`/`Stub` HAL boundary convention as every other driver here —
+see [`Stm32SpiDriver`'s own `docs/sdd.md`](Drv/STM32SpiDriver/docs/sdd.md)
+for the full design, including why `spiWriteReadAsync`'s port type and
+`Drv.AsyncSpiCfg` config are hand-declared locally (this project's pinned
+`fprime` version doesn't have them) and its known DMA limitation (SPI5's
+current CubeMX config has no DMA request attached, so `DMA` mode asserts
+rather than running until that's regenerated).
 
-Not yet wired to a sensor component or validated on real hardware — the
-BMP280 wiring follows the exact "Adding a sensor" pattern above (`BmpManager`
-already declares an `output port spiReadWrite: Drv.SpiReadWrite`, matching
-this driver's port type directly with no adapter needed) but is a separate,
-not-yet-done checklist item.
+Validated live against a real BMP280 pressure/temperature sensor in
+`POLLED` mode — wired via the exact "Adding a sensor" pattern above
+(`BmpManager` declares an `output port spiWriteRead: Drv.SpiWriteRead`,
+matching this driver's port type directly with no adapter needed).
 
 ## Hardware validation
 
