@@ -36,19 +36,74 @@ TEST(Nominal, OpenDma) {
     tester.testOpenDma();
 }
 
-TEST(Nominal, WriteDmaSuccess) {
+TEST(Nominal, WriteAsyncSuccess) {
     Stm32::Stm32I2cDriverTester tester;
-    tester.testWriteDmaSuccess();
+    tester.testWriteAsyncSuccess();
 }
 
-TEST(Nominal, ReadDmaSuccess) {
+TEST(Nominal, ReadAsyncSuccess) {
     Stm32::Stm32I2cDriverTester tester;
-    tester.testReadDmaSuccess();
+    tester.testReadAsyncSuccess();
 }
 
-TEST(Nominal, WriteDmaTimeout) {
+TEST(Nominal, WriteAsyncFailure) {
     Stm32::Stm32I2cDriverTester tester;
-    tester.testWriteDmaTimeout();
+    tester.testWriteAsyncFailure();
+}
+
+TEST(Nominal, ReadAsyncFailure) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testReadAsyncFailure();
+}
+
+TEST(Nominal, WriteAsyncBusyRejectsSecondRequest) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteAsyncBusyRejectsSecondRequest();
+}
+
+TEST(Nominal, WriteAsyncTimeout) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteAsyncTimeout();
+}
+
+TEST(Nominal, WriteAsyncBeforeOpen) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteAsyncBeforeOpen();
+}
+
+TEST(Nominal, ReadAsyncBeforeOpen) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testReadAsyncBeforeOpen();
+}
+
+TEST(Nominal, WriteReadAsyncBeforeOpen) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteReadAsyncBeforeOpen();
+}
+
+TEST(Nominal, WriteAsyncRejectedWhenNotDma) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteAsyncRejectedWhenNotDma();
+}
+
+TEST(Nominal, WriteReadAsyncSuccess) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteReadAsyncSuccess();
+}
+
+TEST(Nominal, WriteReadAsyncWriteFailureShortCircuits) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteReadAsyncWriteFailureShortCircuits();
+}
+
+TEST(Nominal, WriteReadAsyncReadPhaseFailure) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testWriteReadAsyncReadPhaseFailure();
+}
+
+TEST(Nominal, PollNoOpWhenIdle) {
+    Stm32::Stm32I2cDriverTester tester;
+    tester.testPollNoOpWhenIdle();
 }
 
 TEST(Nominal, WriteBeforeOpen) {

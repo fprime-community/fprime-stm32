@@ -15,8 +15,10 @@ extern bool Stub_hwOpenSucceeds = true;                                    // si
 extern Drv::I2cStatus Stub_hwMasterTransmitStatus = Drv::I2cStatus::I2C_OK;  // status hwMasterTransmit() reports
 extern Drv::I2cStatus Stub_hwMasterReceiveStatus = Drv::I2cStatus::I2C_OK;   // status hwMasterReceive() reports
 extern U8 Stub_readResponseData[32] = {0};        // bytes hwMasterReceive() copies into the caller's buffer
-extern bool Stub_dmaCompletes = true;      // DMA mode only: simulates the completion ISR firing before the timeout
-extern Drv::I2cStatus Stub_dmaTimeoutI2cStatus = Drv::I2cStatus::I2C_WRITE_ERR;  // DMA mode only, when Stub_dmaCompletes is false
+extern I32 Stub_hwStartAsyncTransmitStatus = 0;      // HAL_StatusTypeDef hwStartAsyncTransmit() reports (0 == HAL_OK)
+extern I32 Stub_hwStartAsyncReceiveStatus = 0;       // HAL_StatusTypeDef hwStartAsyncReceive() reports (0 == HAL_OK)
+extern bool Stub_hwAbortAsyncTransactionCalled = false;  // observable: true after hwAbortAsyncTransaction() runs
+extern bool Stub_hwFinishAsyncReceiveCalled = false;      // observable: true after hwFinishAsyncReceive() runs
 
 // Observable stub state for unit tests
 extern Stm32::I2cInstance Stub_lastOpenedInstance = Stm32::I2cInstance::I2c1;  // instance most recently passed to open()
@@ -57,20 +59,12 @@ Drv::I2cStatus Stm32I2cDriver ::hwMasterTransmit(U16 devAddress, U8* data, U16 l
     }
     Stub_lastWriteLen = static_cast<U16>(captured);
 
-    if ((this->m_transferMode == TransferMode::DMA) && !Stub_dmaCompletes) {
-        return Stub_dmaTimeoutI2cStatus;
-    }
-
     return Stub_hwMasterTransmitStatus;
 }
 
 Drv::I2cStatus Stm32I2cDriver ::hwMasterReceive(U16 devAddress, U8* data, U16 len) {
     Stub_lastDevAddress = devAddress;
     Stub_lastReadLen = len;
-
-    if ((this->m_transferMode == TransferMode::DMA) && !Stub_dmaCompletes) {
-        return Stub_dmaTimeoutI2cStatus;
-    }
 
     const FwSizeType toCopy =
         (static_cast<FwSizeType>(len) < sizeof(Stub_readResponseData)) ? static_cast<FwSizeType>(len) : sizeof(Stub_readResponseData);
@@ -79,6 +73,46 @@ Drv::I2cStatus Stm32I2cDriver ::hwMasterReceive(U16 devAddress, U8* data, U16 le
     }
 
     return Stub_hwMasterReceiveStatus;
+}
+
+I32 Stm32I2cDriver ::hwStartAsyncTransmit(U16 devAddress, U8* data, U16 len) {
+    Stub_lastDevAddress = devAddress;
+
+    const FwSizeType captured =
+        (static_cast<FwSizeType>(len) < sizeof(Stub_lastWriteData)) ? static_cast<FwSizeType>(len) : sizeof(Stub_lastWriteData);
+    for (FwSizeType i = 0; i < captured; i++) {
+        Stub_lastWriteData[i] = data[i];
+    }
+    Stub_lastWriteLen = static_cast<U16>(captured);
+
+    return Stub_hwStartAsyncTransmitStatus;
+}
+
+I32 Stm32I2cDriver ::hwStartAsyncReceive(U16 devAddress, U8* data, U16 len) {
+    Stub_lastDevAddress = devAddress;
+    Stub_lastReadLen = len;
+
+    if (Stub_hwStartAsyncReceiveStatus == 0) {
+        const FwSizeType toCopy = (static_cast<FwSizeType>(len) < sizeof(Stub_readResponseData))
+                                       ? static_cast<FwSizeType>(len)
+                                       : sizeof(Stub_readResponseData);
+        for (FwSizeType i = 0; i < toCopy; i++) {
+            data[i] = Stub_readResponseData[i];
+        }
+    }
+
+    return Stub_hwStartAsyncReceiveStatus;
+}
+
+void Stm32I2cDriver ::hwAbortAsyncTransaction(U16 devAddress) {
+    (void)devAddress;
+    Stub_hwAbortAsyncTransactionCalled = true;
+}
+
+void Stm32I2cDriver ::hwFinishAsyncReceive(U8* data, FwSizeType len) {
+    (void)data;
+    (void)len;
+    Stub_hwFinishAsyncReceiveCalled = true;
 }
 
 }  // namespace Stm32
