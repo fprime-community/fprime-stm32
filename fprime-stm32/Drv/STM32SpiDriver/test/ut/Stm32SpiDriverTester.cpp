@@ -6,6 +6,9 @@
 
 #include "Stm32SpiDriverTester.hpp"
 
+#include <Fw/Time/TimeInterval.hpp>
+#include <Os/Task.hpp>
+
 // Stub_* globals defined in Stm32SpiDriverStub.cpp -- declared here so this
 // Tester can inject HAL boundary success/failure and inspect exactly what
 // Stm32SpiDriverCommon.cpp drove through it, instead of only exercising the
@@ -13,14 +16,15 @@
 extern bool Stub_hwOpenSucceeds;
 extern I32 Stub_hwTransmitReceiveStatus;
 extern U8 Stub_rxResponseData[32];
+extern I32 Stub_hwStartAsyncTransferStatus;
+extern bool Stub_hwAbortAsyncTransferCalled;
+extern bool Stub_hwFinishAsyncTransferCalled;
 extern Stm32::SpiInstance Stub_lastOpenedInstance;
 extern Stm32::GpioPort Stub_lastCsPort;
 extern U16 Stub_lastCsPin;
 extern bool Stub_csActiveDuringTransfer;
 extern U8 Stub_lastTxData[32];
 extern FwSizeType Stub_lastTxLen;
-extern bool Stub_dmaCompletes;
-extern I32 Stub_dmaTimeoutStatus;
 extern Stm32::TransferMode Stub_lastOpenedMode;
 
 namespace Stm32 {
@@ -47,6 +51,9 @@ void Stm32SpiDriverTester ::resetStubState() {
     for (FwSizeType i = 0; i < sizeof(Stub_rxResponseData); i++) {
         Stub_rxResponseData[i] = 0;
     }
+    Stub_hwStartAsyncTransferStatus = 0;
+    Stub_hwAbortAsyncTransferCalled = false;
+    Stub_hwFinishAsyncTransferCalled = false;
     Stub_lastOpenedInstance = SpiInstance::Spi5;
     Stub_lastCsPort = Stm32::GpioPort::A;
     Stub_lastCsPin = 0;
@@ -55,8 +62,6 @@ void Stm32SpiDriverTester ::resetStubState() {
         Stub_lastTxData[i] = 0;
     }
     Stub_lastTxLen = 0;
-    Stub_dmaCompletes = true;
-    Stub_dmaTimeoutStatus = 3;
     Stub_lastOpenedMode = Stm32::TransferMode::POLLED;
 }
 
@@ -94,7 +99,7 @@ void Stm32SpiDriverTester ::testOpenDma() {
     ASSERT_EQ(Stub_lastOpenedMode, Stm32::TransferMode::DMA);
 }
 
-void Stm32SpiDriverTester ::testSpiWriteReadDmaSuccess() {
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncSuccess() {
     (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::DMA);
     Stub_rxResponseData[0] = 0x58;
     Stub_rxResponseData[1] = 0x11;
@@ -103,42 +108,128 @@ void Stm32SpiDriverTester ::testSpiWriteReadDmaSuccess() {
     U8 rbacking[2] = {0};
     Fw::Buffer writeBuffer(wdata, sizeof(wdata));
     Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
-    const Drv::SpiStatus status = this->invoke_to_SpiWriteRead(0, writeBuffer, readBuffer);
-    ASSERT_EQ(status, Drv::SpiStatus::SPI_OK);
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer, readBuffer);
+
+    // hwStartAsyncTransfer() ran synchronously within the request (the stub
+    // has no real ISR), but the completion must not be delivered until
+    // poll() runs -- this is the "never from inside the request call"
+    // contract spiWriteReadAsync shares with Samd21::SpiDriver.
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
     ASSERT_TRUE(Stub_csActiveDuringTransfer);
     ASSERT_EQ(Stub_lastTxLen, 2u);
     ASSERT_EQ(Stub_lastTxData[0], 0xD0);
+
+    // signalDmaComplete() (the target of the real ISR trampoline) is what
+    // frees poll() to deliver the completion.
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OK);
     ASSERT_EQ(rbacking[0], 0x58);
     ASSERT_EQ(rbacking[1], 0x11);
+    ASSERT_TRUE(Stub_hwFinishAsyncTransferCalled);
 }
 
-void Stm32SpiDriverTester ::testSpiWriteReadDmaFailure() {
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncFailure() {
     (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::DMA);
-    Stub_hwTransmitReceiveStatus = 1;  // DMA "completed" but the latched error code was non-zero
+    Stub_hwStartAsyncTransferStatus = 1;  // any non-zero (non-HAL_OK) status
 
     U8 wdata[1] = {0xD0};
     U8 rbacking[1] = {0};
     Fw::Buffer writeBuffer(wdata, sizeof(wdata));
     Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
-    const Drv::SpiStatus status = this->invoke_to_SpiWriteRead(0, writeBuffer, readBuffer);
-    ASSERT_EQ(status, Drv::SpiStatus::SPI_WRITE_ERR);
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer, readBuffer);
+
+    // A HAL failure to even START the transfer is reported immediately
+    // (there is nothing for poll() to observe later).
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer, readBuffer, Drv::SpiStatus::SPI_WRITE_ERR);
     ASSERT_EVENTS_HalError_SIZE(1);
-    ASSERT_EVENTS_HalError(0, "TransmitReceive", 1);
+    ASSERT_EVENTS_HalError(0, "TransmitReceive_DMA", 1);
 }
 
-void Stm32SpiDriverTester ::testSpiWriteReadDmaTimeout() {
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncBusyRejectsSecondRequest() {
     (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::DMA);
-    Stub_dmaCompletes = false;
-    Stub_dmaTimeoutStatus = 3;  // mirrors real HAL_TIMEOUT
+
+    U8 wdata1[1] = {0xD0};
+    U8 rbacking1[1] = {0};
+    Fw::Buffer writeBuffer1(wdata1, sizeof(wdata1));
+    Fw::Buffer readBuffer1(rbacking1, sizeof(rbacking1));
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer1, readBuffer1);
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);  // first request still in flight
+
+    U8 wdata2[1] = {0xD1};
+    U8 rbacking2[1] = {0};
+    Fw::Buffer writeBuffer2(wdata2, sizeof(wdata2));
+    Fw::Buffer readBuffer2(rbacking2, sizeof(rbacking2));
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer2, readBuffer2);
+
+    // The second request is refused synchronously -- never from an ISR,
+    // never waiting on the first transfer's completion.
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer2, readBuffer2, Drv::SpiStatus::SPI_OTHER_ERR);
+
+    // The first request's own completion still arrives normally.
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(2);
+    ASSERT_from_spiWriteReadAsyncComplete(1, writeBuffer1, readBuffer1, Drv::SpiStatus::SPI_OK);
+}
+
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncTimeout() {
+    (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::DMA);
 
     U8 wdata[1] = {0xD0};
     U8 rbacking[1] = {0};
     Fw::Buffer writeBuffer(wdata, sizeof(wdata));
     Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
-    const Drv::SpiStatus status = this->invoke_to_SpiWriteRead(0, writeBuffer, readBuffer);
-    ASSERT_EQ(status, Drv::SpiStatus::SPI_WRITE_ERR);
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer, readBuffer);
+
+    this->component.poll();  // kicks off the transfer; m_dmaBusy is already true
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
+
+    // The stub never calls signalDmaComplete() on its own, so the transfer
+    // is still "in flight" after the open()-configured 10ms m_timeoutMs
+    // elapses; wait comfortably longer than that, matching
+    // Stm32UartDriverTester::testTxWatchdogTimeout()'s pattern.
+    (void)Os::Task::delay(Fw::TimeInterval(0, 20000));  // 20 ms
+    this->component.poll();
+
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OTHER_ERR);
+    ASSERT_TRUE(Stub_hwAbortAsyncTransferCalled);
     ASSERT_EVENTS_HalError_SIZE(1);
-    ASSERT_EVENTS_HalError(0, "TransmitReceive", 3);
+}
+
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncBeforeOpen() {
+    U8 wdata[1] = {0xD0};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wdata, sizeof(wdata));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer, readBuffer);
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OPEN_ERR);
+}
+
+void Stm32SpiDriverTester ::testSpiWriteReadAsyncRejectedWhenNotDma() {
+    (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::POLLED);
+
+    U8 wdata[1] = {0xD0};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wdata, sizeof(wdata));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer, readBuffer);
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OTHER_ERR);
+}
+
+void Stm32SpiDriverTester ::testPollNoOpWhenIdle() {
+    (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::POLLED);
+    // No spiWriteReadAsync request was ever issued on this POLLED-mode
+    // instance -- poll() must be a harmless no-op, confirming it is safe
+    // to call unconditionally regardless of an instance's mode.
+    this->component.poll();
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
 }
 
 void Stm32SpiDriverTester ::testReopenSwitchesMode() {
@@ -151,17 +242,19 @@ void Stm32SpiDriverTester ::testReopenSwitchesMode() {
     ASSERT_EQ(this->invoke_to_SpiWriteRead(0, writeBuffer1, readBuffer1), Drv::SpiStatus::SPI_OK);
     ASSERT_EQ(rbacking1[0], 0x11);
 
-    // Re-open the SAME component instance in DMA mode and inject a DMA
-    // timeout -- a driver that kept the old POLLED mode cached somewhere
-    // other than m_transferMode would ignore Stub_dmaCompletes and still
-    // report success here.
+    // Re-open the SAME component instance in DMA mode and inject a HAL
+    // start failure -- a driver that kept the old POLLED mode cached
+    // somewhere other than m_transferMode would route this request through
+    // the blocking SpiWriteRead path instead of spiWriteReadAsync.
     (void)this->component.open(SpiInstance::Spi5, Stm32::GpioPort::F, 6, 10, Stm32::TransferMode::DMA);
-    Stub_dmaCompletes = false;
+    Stub_hwStartAsyncTransferStatus = 1;
     U8 wdata2[1] = {0xD1};
     U8 rbacking2[1] = {0};
     Fw::Buffer writeBuffer2(wdata2, sizeof(wdata2));
     Fw::Buffer readBuffer2(rbacking2, sizeof(rbacking2));
-    ASSERT_EQ(this->invoke_to_SpiWriteRead(0, writeBuffer2, readBuffer2), Drv::SpiStatus::SPI_WRITE_ERR);
+    this->invoke_to_spiWriteReadAsync(0, writeBuffer2, readBuffer2);
+    ASSERT_from_spiWriteReadAsyncComplete_SIZE(1);
+    ASSERT_from_spiWriteReadAsyncComplete(0, writeBuffer2, readBuffer2, Drv::SpiStatus::SPI_WRITE_ERR);
 }
 
 void Stm32SpiDriverTester ::testSpiWriteReadBeforeOpen() {

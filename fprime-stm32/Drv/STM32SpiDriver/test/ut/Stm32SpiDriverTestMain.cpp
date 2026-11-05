@@ -26,19 +26,39 @@ TEST(Nominal, OpenDma) {
     tester.testOpenDma();
 }
 
-TEST(Nominal, SpiWriteReadDmaSuccess) {
+TEST(Nominal, SpiWriteReadAsyncSuccess) {
     Stm32::Stm32SpiDriverTester tester;
-    tester.testSpiWriteReadDmaSuccess();
+    tester.testSpiWriteReadAsyncSuccess();
 }
 
-TEST(Nominal, SpiWriteReadDmaFailure) {
+TEST(Nominal, SpiWriteReadAsyncFailure) {
     Stm32::Stm32SpiDriverTester tester;
-    tester.testSpiWriteReadDmaFailure();
+    tester.testSpiWriteReadAsyncFailure();
 }
 
-TEST(Nominal, SpiWriteReadDmaTimeout) {
+TEST(Nominal, SpiWriteReadAsyncBusyRejectsSecondRequest) {
     Stm32::Stm32SpiDriverTester tester;
-    tester.testSpiWriteReadDmaTimeout();
+    tester.testSpiWriteReadAsyncBusyRejectsSecondRequest();
+}
+
+TEST(Nominal, SpiWriteReadAsyncTimeout) {
+    Stm32::Stm32SpiDriverTester tester;
+    tester.testSpiWriteReadAsyncTimeout();
+}
+
+TEST(Nominal, SpiWriteReadAsyncBeforeOpen) {
+    Stm32::Stm32SpiDriverTester tester;
+    tester.testSpiWriteReadAsyncBeforeOpen();
+}
+
+TEST(Nominal, SpiWriteReadAsyncRejectedWhenNotDma) {
+    Stm32::Stm32SpiDriverTester tester;
+    tester.testSpiWriteReadAsyncRejectedWhenNotDma();
+}
+
+TEST(Nominal, PollNoOpWhenIdle) {
+    Stm32::Stm32SpiDriverTester tester;
+    tester.testPollNoOpWhenIdle();
 }
 
 TEST(Nominal, ReopenSwitchesMode) {
