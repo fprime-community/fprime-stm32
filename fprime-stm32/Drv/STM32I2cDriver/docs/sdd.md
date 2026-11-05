@@ -91,12 +91,6 @@ On a successful completion that involves a receive (`READ`, or `WRITE_READ`'s re
 
 **Known limitation**: this project's current CubeMX configuration for I2C1 has no DMA request attached (`Hardware/stm32h753_hal/Core/Src/i2c.c`'s `HAL_I2C_MspInit()` never calls `__HAL_LINKDMA()`), so `open(..., TransferMode::DMA)` on I2C1 will fail its `hdmatx`/`hdmarx` assertion today rather than silently dereferencing a null DMA handle during a transaction. Using DMA mode on real hardware requires regenerating the CubeMX project with a DMA request added to the target I2C instance first -- the same prerequisite §3.3 already documents for enabling an instance beyond I2C1 at all.
 
-### 3.6 Why DMA mode is a separate async port family, not a blocking wait inside the guarded call
-
-An earlier version of this driver served DMA transactions through `write`/`read`/`writeRead` themselves: `hwMasterTransmit()`/`hwMasterReceive()` would start the `_DMA` HAL call and then busy-wait for completion *inside* the guarded port call, temporarily calling `this->unLock()` before the wait and `this->lock()` after -- because on this bare-metal target, `lock()`/`unLock()` resolve to `Os::Mutex::take()`/`release()` (`Os/Stm32H7/Mutex.cpp`), which preserve/restore `PRIMASK` around `__disable_irq()`. Left locked for the whole call, the I2C event/error interrupt that the busy-wait depends on could never fire, so the wait would spin to its own timeout on every single DMA transaction, unconditionally -- which is exactly what happened the first time this path was exercised on real hardware.
-
-The unlock/relock trick made that work, but only by relying on this executive being cooperative and non-preemptive (nothing but an ISR can run while the port is momentarily unlocked, and this codebase's ISRs never make F´ port calls) -- a fragile invariant to depend on for every future DMA-mode caller, and one that becomes awkward for `writeReadAsync`'s two-phase sequence in particular. The current design removes the dependency entirely: each `*Async_handler()` only *starts* its transaction and returns, so the guarded lock is held for a bounded, short duration, never across the DMA wait. `poll()`, which performs the actual wait/recovery/phase-advance, runs outside any guarded port, so it can never be blocked by -- or block -- a concurrent guarded caller. This is the same shape `Stm32UartDriver` already used for its own DMA-backed TX/RX ring buffer, and the same shape `Stm32SpiDriver`'s own `spiWriteReadAsync`/`poll()` uses (see its `docs/sdd.md` §3.6).
-
 ## 4. Usage
 
 ```cpp
