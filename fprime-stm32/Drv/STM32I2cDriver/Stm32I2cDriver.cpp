@@ -168,7 +168,9 @@ Fw::Success Stm32I2cDriver ::open(I2cInstance instance, I2cBusSpeed busSpeed, Tr
     // MX_I2Cn_Init() traps in Error_Handler() on failure rather than
     // returning a status (matches every other CubeMX-generated
     // MX_*_Init() in this project).
-    callInstanceInit(instance);
+    if (halHandle->State == HAL_I2C_STATE_RESET) {
+        callInstanceInit(instance);
+    }
 
     const uint32_t timing = toTiming(busSpeed);
     if (timing != halHandle->Init.Timing) {
@@ -201,7 +203,12 @@ Fw::Success Stm32I2cDriver ::open(I2cInstance instance, I2cBusSpeed busSpeed, Tr
 //! Address-phase NACK (no device answered) is reported via HAL_I2C_GetError(),
 //! not the HAL_StatusTypeDef -- distinguishes I2C_ADDRESS_ERR from a
 //! data-phase/bus I2C_WRITE_ERR/I2C_READ_ERR.
-//!
+bool Stm32I2cDriver ::hwIsBusy() {
+    I2C_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
+    FW_ASSERT(halHandle != nullptr);
+    return halHandle->State != HAL_I2C_STATE_READY;
+}
+
 //! POLLED mode only (see Stm32I2cDriver.hpp): DMA-mode instances serve
 //! writeAsync/readAsync/writeReadAsync via hwStartAsyncTransmit()/
 //! hwStartAsyncReceive()/poll() instead, never this blocking path.

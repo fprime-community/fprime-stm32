@@ -11,8 +11,25 @@
 
 #include <fprime-stm32/Drv/STM32I2cDriver/Stm32I2cDriver.hpp>
 #include <Fw/Types/Assert.hpp>
+#include <Os/RawTime.hpp>
 
 namespace Stm32 {
+
+//! Wait for a sibling Stm32I2cDriver instance on the same physical peripheral
+void Stm32I2cDriver ::waitWhileBusy() {
+    Os::RawTime waitStart;
+    (void)waitStart.now();
+    const U32 timeoutUs = TRANSACTION_TIMEOUT_MS * 1000U;
+    while (this->hwIsBusy()) {
+        Os::RawTime now;
+        (void)now.now();
+        U32 elapsedUs = 0;
+        (void)now.getDiffUsec(waitStart, elapsedUs);
+        if (elapsedUs >= timeoutUs) {
+            break;
+        }
+    }
+}
 
 // ----------------------------------------------------------------------
 // Construction, initialization, and destruction
@@ -56,6 +73,7 @@ Drv::I2cStatus Stm32I2cDriver ::write_handler(const FwIndexType portNum, U32 add
     FW_ASSERT_NO_OVERFLOW(addr, U16);
     FW_ASSERT_NO_OVERFLOW(serBuffer.getSize(), U16);
 
+    this->waitWhileBusy();
     return this->hwMasterTransmit(static_cast<U16>(addr), serBuffer.getData(), static_cast<U16>(serBuffer.getSize()));
 }
 
@@ -67,6 +85,7 @@ Drv::I2cStatus Stm32I2cDriver ::read_handler(const FwIndexType portNum, U32 addr
     FW_ASSERT_NO_OVERFLOW(addr, U16);
     FW_ASSERT_NO_OVERFLOW(serBuffer.getSize(), U16);
 
+    this->waitWhileBusy();
     return this->hwMasterReceive(static_cast<U16>(addr), serBuffer.getData(), static_cast<U16>(serBuffer.getSize()));
 }
 
@@ -90,6 +109,7 @@ Drv::I2cStatus Stm32I2cDriver ::writeRead_handler(const FwIndexType portNum,
 
     const U16 devAddress = static_cast<U16>(addr);
 
+    this->waitWhileBusy();
     const Drv::I2cStatus writeStatus =
         this->hwMasterTransmit(devAddress, writeBuffer.getData(), static_cast<U16>(writeBuffer.getSize()));
     if (Drv::I2cStatus::I2C_OK != writeStatus) {
@@ -115,6 +135,11 @@ void Stm32I2cDriver ::writeAsync_handler(const FwIndexType portNum, U32 addr, Fw
     // open()), so starting a DMA transaction on one would hang until
     // poll()'s own watchdog times it out -- reject immediately instead.
     if ((this->m_transferMode != TransferMode::DMA) || this->m_asyncPending) {
+        this->writeAsyncComplete_out(portNum, buffer, Drv::I2cStatus::I2C_OTHER_ERR);
+        return;
+    }
+    // Reject immediately if the hardware is busy, rather than spinning or waiting.
+    if (this->hwIsBusy()) {
         this->writeAsyncComplete_out(portNum, buffer, Drv::I2cStatus::I2C_OTHER_ERR);
         return;
     }
@@ -154,6 +179,10 @@ void Stm32I2cDriver ::readAsync_handler(const FwIndexType portNum, U32 addr, Fw:
         this->readAsyncComplete_out(portNum, buffer, Drv::I2cStatus::I2C_OTHER_ERR);
         return;
     }
+    if (this->hwIsBusy()) {
+        this->readAsyncComplete_out(portNum, buffer, Drv::I2cStatus::I2C_OTHER_ERR);
+        return;
+    }
     FW_ASSERT(buffer.getData() != nullptr);
     FW_ASSERT_NO_OVERFLOW(addr, U16);
     FW_ASSERT_NO_OVERFLOW(buffer.getSize(), U16);
@@ -187,6 +216,10 @@ void Stm32I2cDriver ::writeReadAsync_handler(const FwIndexType portNum,
         return;
     }
     if ((this->m_transferMode != TransferMode::DMA) || this->m_asyncPending) {
+        this->writeReadAsyncComplete_out(portNum, writeBuffer, readBuffer, Drv::I2cStatus::I2C_OTHER_ERR);
+        return;
+    }
+    if (this->hwIsBusy()) {
         this->writeReadAsyncComplete_out(portNum, writeBuffer, readBuffer, Drv::I2cStatus::I2C_OTHER_ERR);
         return;
     }

@@ -28,6 +28,7 @@ extern I32 Stub_hwStartAsyncTransmitStatus;
 extern I32 Stub_hwStartAsyncReceiveStatus;
 extern bool Stub_hwAbortAsyncTransactionCalled;
 extern bool Stub_hwFinishAsyncReceiveCalled;
+extern bool Stub_hwIsBusy;
 
 namespace Stm32 {
 
@@ -67,6 +68,7 @@ void Stm32I2cDriverTester ::resetStubState() {
     Stub_hwStartAsyncReceiveStatus = 0;
     Stub_hwAbortAsyncTransactionCalled = false;
     Stub_hwFinishAsyncReceiveCalled = false;
+    Stub_hwIsBusy = false;
 }
 
 // ----------------------------------------------------------------------

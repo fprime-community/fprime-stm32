@@ -19,6 +19,7 @@ extern I32 Stub_hwStartAsyncTransmitStatus = 0;      // HAL_StatusTypeDef hwStar
 extern I32 Stub_hwStartAsyncReceiveStatus = 0;       // HAL_StatusTypeDef hwStartAsyncReceive() reports (0 == HAL_OK)
 extern bool Stub_hwAbortAsyncTransactionCalled = false;  // observable: true after hwAbortAsyncTransaction() runs
 extern bool Stub_hwFinishAsyncReceiveCalled = false;      // observable: true after hwFinishAsyncReceive() runs
+extern bool Stub_hwIsBusy = false;                        // simulates a sibling instance holding the shared peripheral busy
 
 // Observable stub state for unit tests
 extern Stm32::I2cInstance Stub_lastOpenedInstance = Stm32::I2cInstance::I2c1;  // instance most recently passed to open()
@@ -47,6 +48,10 @@ Fw::Success Stm32I2cDriver ::open(I2cInstance instance, I2cBusSpeed busSpeed, Tr
 
     this->log_ACTIVITY_HI_PortOpened(_speedArg);
     return Fw::Success::SUCCESS;
+}
+
+bool Stm32I2cDriver ::hwIsBusy() {
+    return Stub_hwIsBusy;
 }
 
 Drv::I2cStatus Stm32I2cDriver ::hwMasterTransmit(U16 devAddress, U8* data, U16 len) {

@@ -100,6 +100,25 @@ class Stm32I2cDriver final : public Stm32I2cDriverComponentBase {
     //! async transaction's poll()-observed completion.
     static constexpr U32 TRANSACTION_TIMEOUT_MS = 10;
 
+    //! True if the underlying HAL I2C handle is currently mid-transaction
+    //! (shared across every Stm32I2cDriver instance opened on the same
+    //! I2cInstance -- e.g. two devices on the same bus by address). Checked
+    //! by write_handler/read_handler/writeRead_handler and
+    //! writeAsync_handler/readAsync_handler/writeReadAsync_handler *before*
+    //! starting this instance's own transaction, mirroring
+    //! Stm32SpiDriver::hwIsBusy() -- HAL_I2C_Master_Transmit()/_DMA() and
+    //! their Receive counterparts all return HAL_BUSY immediately rather
+    //! than waiting if hi2c->State isn't READY at entry, which can happen
+    //! if this call lands in the brief window a sibling instance's
+    //! transaction is in flight.
+    bool hwIsBusy();
+
+    //! Spin-wait (bounded by TRANSACTION_TIMEOUT_MS) on hwIsBusy() before a
+    //! blocking write_handler/read_handler/writeRead_handler transaction --
+    //! mirrors Stm32SpiDriver::SpiWriteRead_handler()'s own pre-transfer
+    //! busy-wait.
+    void waitWhileBusy();
+
     //! POLLED mode only: a single blocking HAL_I2C_Master_Transmit() of
     //! `len` bytes to `devAddress`, bounded by TRANSACTION_TIMEOUT_MS.
     //! Returns I2C_OK, I2C_ADDRESS_ERR (address-phase NACK), or
