@@ -101,6 +101,16 @@ class Stm32SpiDriver final : public Stm32SpiDriverComponentBase {
     //! reason as hwSetCs().
     I32 hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType size);
 
+    //! True if the underlying HAL SPI handle is currently mid-transfer
+    //! (shared across every Stm32SpiDriver instance opened on the same
+    //! SpiInstance -- e.g. BMP280 and RFM9X both on SPI5). Checked by
+    //! SpiWriteRead_handler/spiWriteReadAsync_handler *before* asserting
+    //! this instance's own CS, so it never selects its device while a
+    //! sibling instance on the shared peripheral is already selected and
+    //! transferring. Re-resolves the HAL handle from m_instance on every
+    //! call, for the same multi-instance-safety reason as hwSetCs().
+    bool hwIsBusy();
+
     //! DMA mode only: clean the D-cache over [txData, txData + size) and
     //! start an HAL_SPI_TransmitReceive_DMA() transfer, returning
     //! immediately. Returns the raw HAL_StatusTypeDef value (0 == HAL_OK);

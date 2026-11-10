@@ -19,6 +19,7 @@ extern U8 Stub_rxResponseData[32];
 extern I32 Stub_hwStartAsyncTransferStatus;
 extern bool Stub_hwAbortAsyncTransferCalled;
 extern bool Stub_hwFinishAsyncTransferCalled;
+extern bool Stub_hwIsBusy;
 extern Stm32::SpiInstance Stub_lastOpenedInstance;
 extern Stm32::GpioPort Stub_lastCsPort;
 extern U16 Stub_lastCsPin;
@@ -54,6 +55,7 @@ void Stm32SpiDriverTester ::resetStubState() {
     Stub_hwStartAsyncTransferStatus = 0;
     Stub_hwAbortAsyncTransferCalled = false;
     Stub_hwFinishAsyncTransferCalled = false;
+    Stub_hwIsBusy = false;
     Stub_lastOpenedInstance = SpiInstance::Spi5;
     Stub_lastCsPort = Stm32::GpioPort::A;
     Stub_lastCsPin = 0;

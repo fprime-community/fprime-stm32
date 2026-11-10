@@ -36,11 +36,13 @@ Stm32SpiDriver ::Stm32SpiDriver(const char* const compName)
 Stm32SpiDriver ::~Stm32SpiDriver() {}
 
 void Stm32SpiDriver ::signalDmaComplete() {
+    this->hwSetCs(false);
     this->m_dmaErrorCode = 0;
     this->m_dmaBusy = false;
 }
 
 void Stm32SpiDriver ::signalDmaError(U32 errorCode) {
+    this->hwSetCs(false);
     this->m_dmaErrorCode = errorCode;
     this->m_dmaBusy = false;
 }
@@ -62,6 +64,20 @@ Drv::SpiStatus Stm32SpiDriver ::SpiWriteRead_handler(FwIndexType portNum, Fw::Bu
     FW_ASSERT(readBuffer.getData() != nullptr);
     FW_ASSERT(writeBuffer.getSize() == readBuffer.getSize(), static_cast<FwAssertArgType>(writeBuffer.getSize()),
               static_cast<FwAssertArgType>(readBuffer.getSize()));
+
+    // Wait for a sibling instance on the same physical peripheral
+    Os::RawTime waitStart;
+    (void)waitStart.now();
+    const U32 timeoutUs = this->m_timeoutMs * 1000U;
+    while (this->hwIsBusy()) {
+        Os::RawTime now;
+        (void)now.now();
+        U32 elapsedUs = 0;
+        (void)now.getDiffUsec(waitStart, elapsedUs);
+        if (elapsedUs >= timeoutUs) {
+            break;
+        }
+    }
 
     this->hwSetCs(true);
     const I32 status = this->hwTransmitReceive(writeBuffer.getData(), readBuffer.getData(), writeBuffer.getSize());
@@ -108,6 +124,11 @@ void Stm32SpiDriver ::spiWriteReadAsync_handler(FwIndexType portNum, Fw::Buffer&
               static_cast<FwAssertArgType>(readBuffer.getSize()));
 
     if (this->m_asyncPending) {
+        this->spiWriteReadAsyncComplete_out(portNum, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OTHER_ERR);
+        return;
+    }
+
+    if (this->hwIsBusy()) {
         this->spiWriteReadAsyncComplete_out(portNum, writeBuffer, readBuffer, Drv::SpiStatus::SPI_OTHER_ERR);
         return;
     }

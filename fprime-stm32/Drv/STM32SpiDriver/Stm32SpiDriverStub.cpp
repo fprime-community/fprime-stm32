@@ -17,6 +17,7 @@ extern U8 Stub_rxResponseData[32] = {0};          // bytes hwTransmitReceive() c
 extern I32 Stub_hwStartAsyncTransferStatus = 0;       // HAL_StatusTypeDef hwStartAsyncTransfer() reports (0 == HAL_OK)
 extern bool Stub_hwAbortAsyncTransferCalled = false;  // observable: true after hwAbortAsyncTransfer() runs
 extern bool Stub_hwFinishAsyncTransferCalled = false; // observable: true after hwFinishAsyncTransfer() runs
+extern bool Stub_hwIsBusy = false;                    // simulates a sibling instance holding the shared peripheral busy
 
 // Observable stub state for unit tests
 extern Stm32::SpiInstance Stub_lastOpenedInstance = Stm32::SpiInstance::Spi5;  // instance most recently passed to open()
@@ -68,6 +69,10 @@ Fw::Success Stm32SpiDriver ::open(SpiInstance instance,
 
 void Stm32SpiDriver ::hwSetCs(bool active) {
     s_csActive = active;
+}
+
+bool Stm32SpiDriver ::hwIsBusy() {
+    return Stub_hwIsBusy;
 }
 
 I32 Stm32SpiDriver ::hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType size) {

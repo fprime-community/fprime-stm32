@@ -302,7 +302,9 @@ Fw::Success Stm32SpiDriver ::open(SpiInstance instance,
     // MX_SPIn_Init() traps in Error_Handler() on failure rather than
     // returning a status (matches every other CubeMX-generated
     // MX_*_Init() in this project).
-    callInstanceInit(instance);
+    if (halHandle->State == HAL_SPI_STATE_RESET) {
+        callInstanceInit(instance);
+    }
 
     // SPI5 is configured NSS_SOFT: the HAL never drives a CS pin on its
     // own, so this driver owns the chip-select GPIO directly. Idle state
@@ -362,6 +364,12 @@ void Stm32SpiDriver ::hwSetCs(bool active) {
     HAL_GPIO_WritePin(halPort, this->m_csPin, active ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
+bool Stm32SpiDriver ::hwIsBusy() {
+    SPI_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
+    FW_ASSERT(halHandle != nullptr);
+    return halHandle->State != HAL_SPI_STATE_READY;
+}
+
 I32 Stm32SpiDriver ::hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType size) {
     SPI_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
     FW_ASSERT(halHandle != nullptr);
@@ -370,31 +378,9 @@ I32 Stm32SpiDriver ::hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType 
 
     // POLLED mode only (see Stm32SpiDriver.hpp): DMA-mode instances serve
     // spiWriteReadAsync via hwStartAsyncTransfer()/poll() instead, never
-    // this blocking path. hspi5 (or whichever SpiInstance this is) may be
-    // shared with a sibling instance on a different CS: HAL_SPI_TransmitReceive()
-    // returns HAL_BUSY immediately rather than waiting if hspi->State isn't
-    // READY at entry, which can happen if this call lands in the brief
-    // window a sibling instance's DMA transfer is in flight. Retry within
-    // this instance's own timeout budget rather than failing the
-    // transaction outright on what is normally a microseconds-scale race.
-    Os::RawTime pollStart;
-    (void)pollStart.now();
-    const U32 timeoutUs = this->m_timeoutMs * 1000U;
-    HAL_StatusTypeDef status;
-    while (true) {
-        status = HAL_SPI_TransmitReceive(halHandle, const_cast<U8*>(txData), rxData, static_cast<uint16_t>(size),
-                                          this->m_timeoutMs);
-        if (status != HAL_BUSY) {
-            break;
-        }
-        Os::RawTime now;
-        (void)now.now();
-        U32 elapsedUs = 0;
-        (void)now.getDiffUsec(pollStart, elapsedUs);
-        if (elapsedUs >= timeoutUs) {
-            break;
-        }
-    }
+    // this blocking path.
+    const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+        halHandle, const_cast<U8*>(txData), rxData, static_cast<uint16_t>(size), this->m_timeoutMs);
     return static_cast<I32>(status);
 }
 
