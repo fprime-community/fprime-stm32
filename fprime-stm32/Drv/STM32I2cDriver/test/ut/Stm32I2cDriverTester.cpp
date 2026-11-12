@@ -6,6 +6,9 @@
 
 #include "Stm32I2cDriverTester.hpp"
 
+#include <Fw/Time/TimeInterval.hpp>
+#include <Os/Task.hpp>
+
 // Stub_* globals defined in Stm32I2cDriverStub.cpp -- declared here so this
 // Tester can inject HAL boundary success/failure and inspect exactly what
 // Stm32I2cDriverCommon.cpp drove through it, instead of only exercising the
@@ -20,9 +23,12 @@ extern U16 Stub_lastDevAddress;
 extern U8 Stub_lastWriteData[32];
 extern U16 Stub_lastWriteLen;
 extern U16 Stub_lastReadLen;
-extern bool Stub_dmaCompletes;
-extern Drv::I2cStatus Stub_dmaTimeoutI2cStatus;
 extern Stm32::TransferMode Stub_lastOpenedMode;
+extern I32 Stub_hwStartAsyncTransmitStatus;
+extern I32 Stub_hwStartAsyncReceiveStatus;
+extern bool Stub_hwAbortAsyncTransactionCalled;
+extern bool Stub_hwFinishAsyncReceiveCalled;
+extern bool Stub_hwIsBusy;
 
 namespace Stm32 {
 
@@ -57,9 +63,12 @@ void Stm32I2cDriverTester ::resetStubState() {
     }
     Stub_lastWriteLen = 0;
     Stub_lastReadLen = 0;
-    Stub_dmaCompletes = true;
-    Stub_dmaTimeoutI2cStatus = Drv::I2cStatus::I2C_WRITE_ERR;
     Stub_lastOpenedMode = Stm32::TransferMode::POLLED;
+    Stub_hwStartAsyncTransmitStatus = 0;
+    Stub_hwStartAsyncReceiveStatus = 0;
+    Stub_hwAbortAsyncTransactionCalled = false;
+    Stub_hwFinishAsyncReceiveCalled = false;
+    Stub_hwIsBusy = false;
 }
 
 // ----------------------------------------------------------------------
@@ -116,39 +125,219 @@ void Stm32I2cDriverTester ::testOpenDma() {
     ASSERT_EQ(Stub_lastOpenedMode, Stm32::TransferMode::DMA);
 }
 
-void Stm32I2cDriverTester ::testWriteDmaSuccess() {
+void Stm32I2cDriverTester ::testWriteAsyncSuccess() {
     (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
 
     U8 data[4] = {0xDE, 0xAD, 0xBE, 0xEF};
     Fw::Buffer buffer(data, sizeof(data));
-    const Drv::I2cStatus status = this->invoke_to_write(0, 0x50, buffer);
-    ASSERT_EQ(status, Drv::I2cStatus::I2C_OK);
+    this->invoke_to_writeAsync(0, 0x50, buffer);
+
+    // hwStartAsyncTransmit() ran synchronously within the request (the
+    // stub has no real ISR), but the completion must not be delivered
+    // until poll() runs -- same "never from inside the request call"
+    // contract as Stm32SpiDriver::spiWriteReadAsync.
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
     ASSERT_EQ(Stub_lastDevAddress, 0x50);
     ASSERT_EQ(Stub_lastWriteLen, 4u);
+
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer, Drv::I2cStatus::I2C_OK);
 }
 
-void Stm32I2cDriverTester ::testReadDmaSuccess() {
+void Stm32I2cDriverTester ::testReadAsyncSuccess() {
     (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
     Stub_readResponseData[0] = 0x11;
     Stub_readResponseData[1] = 0x22;
 
     U8 backing[2] = {0};
     Fw::Buffer buffer(backing, sizeof(backing));
-    const Drv::I2cStatus status = this->invoke_to_read(0, 0x50, buffer);
-    ASSERT_EQ(status, Drv::I2cStatus::I2C_OK);
+    this->invoke_to_readAsync(0, 0x50, buffer);
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
+
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_readAsyncComplete_SIZE(1);
+    ASSERT_from_readAsyncComplete(0, buffer, Drv::I2cStatus::I2C_OK);
     ASSERT_EQ(backing[0], 0x11);
     ASSERT_EQ(backing[1], 0x22);
+    ASSERT_TRUE(Stub_hwFinishAsyncReceiveCalled);
 }
 
-void Stm32I2cDriverTester ::testWriteDmaTimeout() {
+void Stm32I2cDriverTester ::testWriteAsyncFailure() {
     (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
-    Stub_dmaCompletes = false;
-    Stub_dmaTimeoutI2cStatus = Drv::I2cStatus::I2C_WRITE_ERR;
+    Stub_hwStartAsyncTransmitStatus = 1;  // any non-zero (non-HAL_OK) status
 
     U8 data[1] = {0x00};
     Fw::Buffer buffer(data, sizeof(data));
-    const Drv::I2cStatus status = this->invoke_to_write(0, 0x50, buffer);
-    ASSERT_EQ(status, Drv::I2cStatus::I2C_WRITE_ERR);
+    this->invoke_to_writeAsync(0, 0x50, buffer);
+
+    // A HAL failure to even START the transaction is reported immediately
+    // (there is nothing for poll() to observe later).
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer, Drv::I2cStatus::I2C_WRITE_ERR);
+    ASSERT_EVENTS_HalError_SIZE(1);
+}
+
+void Stm32I2cDriverTester ::testReadAsyncFailure() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+    Stub_hwStartAsyncReceiveStatus = 1;
+
+    U8 backing[1] = {0};
+    Fw::Buffer buffer(backing, sizeof(backing));
+    this->invoke_to_readAsync(0, 0x50, buffer);
+    ASSERT_from_readAsyncComplete_SIZE(1);
+    ASSERT_from_readAsyncComplete(0, buffer, Drv::I2cStatus::I2C_READ_ERR);
+    ASSERT_EVENTS_HalError_SIZE(1);
+}
+
+void Stm32I2cDriverTester ::testWriteAsyncBusyRejectsSecondRequest() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+
+    U8 data1[1] = {0x10};
+    Fw::Buffer buffer1(data1, sizeof(data1));
+    this->invoke_to_writeAsync(0, 0x50, buffer1);
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);  // first request still in flight
+
+    U8 data2[1] = {0x20};
+    Fw::Buffer buffer2(data2, sizeof(data2));
+    this->invoke_to_writeAsync(0, 0x51, buffer2);
+
+    // The second request is refused synchronously -- never waiting on the
+    // first transaction's completion.
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer2, Drv::I2cStatus::I2C_OTHER_ERR);
+
+    // The first request's own completion still arrives normally.
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_writeAsyncComplete_SIZE(2);
+    ASSERT_from_writeAsyncComplete(1, buffer1, Drv::I2cStatus::I2C_OK);
+}
+
+void Stm32I2cDriverTester ::testWriteAsyncTimeout() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+
+    U8 data[1] = {0x00};
+    Fw::Buffer buffer(data, sizeof(data));
+    this->invoke_to_writeAsync(0, 0x50, buffer);
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
+
+    // The stub never calls signalDmaComplete() on its own, so the
+    // transaction is still "in flight" after TRANSACTION_TIMEOUT_MS (10ms)
+    // elapses; wait comfortably longer, matching
+    // Stm32SpiDriverTester::testSpiWriteReadAsyncTimeout()'s pattern.
+    (void)Os::Task::delay(Fw::TimeInterval(0, 20000));  // 20 ms
+    this->component.poll();
+
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer, Drv::I2cStatus::I2C_WRITE_ERR);
+    ASSERT_TRUE(Stub_hwAbortAsyncTransactionCalled);
+    ASSERT_EVENTS_HalError_SIZE(1);
+}
+
+void Stm32I2cDriverTester ::testWriteAsyncBeforeOpen() {
+    U8 data[1] = {0x00};
+    Fw::Buffer buffer(data, sizeof(data));
+    this->invoke_to_writeAsync(0, 0x50, buffer);
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer, Drv::I2cStatus::I2C_OPEN_ERR);
+}
+
+void Stm32I2cDriverTester ::testReadAsyncBeforeOpen() {
+    U8 backing[1] = {0};
+    Fw::Buffer buffer(backing, sizeof(backing));
+    this->invoke_to_readAsync(0, 0x50, buffer);
+    ASSERT_from_readAsyncComplete_SIZE(1);
+    ASSERT_from_readAsyncComplete(0, buffer, Drv::I2cStatus::I2C_OPEN_ERR);
+}
+
+void Stm32I2cDriverTester ::testWriteReadAsyncBeforeOpen() {
+    U8 wbacking[1] = {0};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wbacking, sizeof(wbacking));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_writeReadAsync(0, 0x50, writeBuffer, readBuffer);
+    ASSERT_from_writeReadAsyncComplete_SIZE(1);
+    ASSERT_from_writeReadAsyncComplete(0, writeBuffer, readBuffer, Drv::I2cStatus::I2C_OPEN_ERR);
+}
+
+void Stm32I2cDriverTester ::testWriteAsyncRejectedWhenNotDma() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::POLLED);
+
+    U8 data[1] = {0x00};
+    Fw::Buffer buffer(data, sizeof(data));
+    this->invoke_to_writeAsync(0, 0x50, buffer);
+    ASSERT_from_writeAsyncComplete_SIZE(1);
+    ASSERT_from_writeAsyncComplete(0, buffer, Drv::I2cStatus::I2C_OTHER_ERR);
+}
+
+void Stm32I2cDriverTester ::testWriteReadAsyncSuccess() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+    Stub_readResponseData[0] = 0x99;
+
+    U8 wdata[1] = {0x10};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wdata, sizeof(wdata));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_writeReadAsync(0, 0x50, writeBuffer, readBuffer);
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
+
+    // Write phase completes -- poll() must start the read phase, not
+    // deliver yet (only one completion for the whole operation).
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
+    ASSERT_EQ(Stub_lastReadLen, 1u);
+
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_writeReadAsyncComplete_SIZE(1);
+    ASSERT_from_writeReadAsyncComplete(0, writeBuffer, readBuffer, Drv::I2cStatus::I2C_OK);
+    ASSERT_EQ(rbacking[0], 0x99);
+}
+
+void Stm32I2cDriverTester ::testWriteReadAsyncWriteFailureShortCircuits() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+    Stub_hwStartAsyncTransmitStatus = 1;
+    Stub_lastReadLen = 999;  // sentinel: must stay untouched if the read phase never starts
+
+    U8 wdata[1] = {0x10};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wdata, sizeof(wdata));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_writeReadAsync(0, 0x50, writeBuffer, readBuffer);
+    ASSERT_from_writeReadAsyncComplete_SIZE(1);
+    ASSERT_from_writeReadAsyncComplete(0, writeBuffer, readBuffer, Drv::I2cStatus::I2C_WRITE_ERR);
+    ASSERT_EQ(Stub_lastReadLen, 999u);
+}
+
+void Stm32I2cDriverTester ::testWriteReadAsyncReadPhaseFailure() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+    Stub_hwStartAsyncReceiveStatus = 1;
+
+    U8 wdata[1] = {0x10};
+    U8 rbacking[1] = {0};
+    Fw::Buffer writeBuffer(wdata, sizeof(wdata));
+    Fw::Buffer readBuffer(rbacking, sizeof(rbacking));
+    this->invoke_to_writeReadAsync(0, 0x50, writeBuffer, readBuffer);
+
+    // Write phase completes successfully; the read phase's own HAL start
+    // then fails, delivering immediately rather than waiting on poll().
+    this->component.signalDmaComplete();
+    this->component.poll();
+    ASSERT_from_writeReadAsyncComplete_SIZE(1);
+    ASSERT_from_writeReadAsyncComplete(0, writeBuffer, readBuffer, Drv::I2cStatus::I2C_READ_ERR);
+}
+
+void Stm32I2cDriverTester ::testPollNoOpWhenIdle() {
+    (void)this->component.open(I2cInstance::I2c1, I2cBusSpeed::Fast, Stm32::TransferMode::POLLED);
+    // No async request was ever issued on this POLLED-mode instance --
+    // poll() must be a harmless no-op, confirming it is safe to call
+    // unconditionally regardless of an instance's mode.
+    this->component.poll();
+    ASSERT_FROM_PORT_HISTORY_SIZE(0);
 }
 
 void Stm32I2cDriverTester ::testWriteBeforeOpen() {
@@ -325,9 +514,9 @@ void Stm32I2cDriverTester ::testTwoInstancesDoNotInterfere() {
     ASSERT_EQ(secondOpenStatus, Fw::Success::SUCCESS);
 
     // The first instance must still be fully functional, unaffected by the
-    // second instance's later open(), and still POLLED (Stub_dmaCompletes
-    // being irrelevant to it proves this).
-    Stub_dmaCompletes = false;
+    // second instance's later open(), and still POLLED -- it blocks
+    // through hwMasterTransmit() rather than the second instance's
+    // DMA/async state.
     U8 backing[2] = {0xAA, 0xBB};
     Fw::Buffer buffer(backing, sizeof(backing));
     const Drv::I2cStatus status = this->invoke_to_write(0, 0x50, buffer);

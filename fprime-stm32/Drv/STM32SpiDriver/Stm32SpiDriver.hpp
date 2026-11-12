@@ -12,6 +12,7 @@
 #include <Fw/Types/BasicTypes.hpp>
 #include <Fw/Types/SuccessEnumAc.hpp>
 #include <Fw/Types/Assert.hpp>
+#include <Os/RawTime.hpp>
 #include <config/Stm32Config.hpp>
 #include <config/Stm32TransferMode.hpp>
 
@@ -46,16 +47,29 @@ class Stm32SpiDriver final : public Stm32SpiDriverComponentBase {
     //! \param timeoutMs per-transaction blocking watchdog passed to every
     //!        HAL_SPI_TransmitReceive()/HAL_SPI_TransmitReceive_DMA() call
     //! \param mode POLLED (default, backward-compatible) issues a single
-    //!        blocking HAL_SPI_TransmitReceive() per transfer; DMA issues
-    //!        HAL_SPI_TransmitReceive_DMA() and blocks the caller until the
-    //!        ISR-signaled completion (or timeoutMs), with D-cache
-    //!        maintenance around the transfer and a DMA-safe-buffer check
-    //!        -- the port's synchronous contract is identical either way.
+    //!        blocking HAL_SPI_TransmitReceive() per transfer from
+    //!        SpiWriteRead/SpiReadWrite. DMA instead serves
+    //!        spiWriteReadAsync: a request starts HAL_SPI_TransmitReceive_DMA()
+    //!        and returns immediately, with poll() draining the ISR-latched
+    //!        completion and invoking spiWriteReadAsyncComplete -- see
+    //!        poll()'s own doc comment. D-cache maintenance and the
+    //!        DMA-safe-buffer check happen around every DMA-mode transfer
+    //!        either way.
     Fw::Success open(SpiInstance instance,
                       Stm32::GpioPort csPort,
                       U16 csPin,
                       U32 timeoutMs = 10,
                       TransferMode mode = TransferMode::POLLED);
+
+    //! One bounded step of the DMA state machine: consume the ISR-latched
+    //! completion/error flag, run cache maintenance, invoke the completion
+    //! callback, and recover a stuck transfer past its watchdog. Called
+    //! every cyclic-executive pass (not from a rate group) so DMA
+    //! completions are serviced with minimal latency -- same contract as
+    //! Stm32UartDriver::poll(). A POLLED-mode instance's poll() call is a
+    //! no-op (m_dmaBusy is never set), so it is safe to call unconditionally
+    //! regardless of this instance's mode.
+    void poll();
 
     // ----------------------------------------------------------------------
     // ISR signal surface: called by the real HAL callback trampoline (free
@@ -79,13 +93,41 @@ class Stm32SpiDriver final : public Stm32SpiDriverComponentBase {
     //! never share any HAL-typed state.
     void hwSetCs(bool active);
 
-    //! Full-duplex transfer of `size` bytes, bounded by m_timeoutMs, in
-    //! either POLLED or DMA mode (branches on m_transferMode). Returns the
-    //! raw HAL_StatusTypeDef value (0 == HAL_OK); does not toggle
-    //! chip-select -- callers bracket this with hwSetCs(). Re-resolves the
-    //! HAL SPI handle from m_instance on every call, for the same
-    //! multi-instance-safety reason as hwSetCs().
+    //! POLLED mode only: a single blocking HAL_SPI_TransmitReceive() of
+    //! `size` bytes, bounded by m_timeoutMs. Returns the raw
+    //! HAL_StatusTypeDef value (0 == HAL_OK); does not toggle chip-select --
+    //! callers bracket this with hwSetCs(). Re-resolves the HAL SPI handle
+    //! from m_instance on every call, for the same multi-instance-safety
+    //! reason as hwSetCs().
     I32 hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType size);
+
+    //! True if the underlying HAL SPI handle is currently mid-transfer
+    //! (shared across every Stm32SpiDriver instance opened on the same
+    //! SpiInstance -- e.g. BMP280 and RFM9X both on SPI5). Checked by
+    //! SpiWriteRead_handler/spiWriteReadAsync_handler *before* asserting
+    //! this instance's own CS, so it never selects its device while a
+    //! sibling instance on the shared peripheral is already selected and
+    //! transferring. Re-resolves the HAL handle from m_instance on every
+    //! call, for the same multi-instance-safety reason as hwSetCs().
+    bool hwIsBusy();
+
+    //! DMA mode only: clean the D-cache over [txData, txData + size) and
+    //! start an HAL_SPI_TransmitReceive_DMA() transfer, returning
+    //! immediately. Returns the raw HAL_StatusTypeDef value (0 == HAL_OK);
+    //! does not toggle chip-select, does not wait for completion -- poll()
+    //! observes the ISR-latched outcome later. Re-resolves the HAL SPI
+    //! handle from m_instance on every call.
+    I32 hwStartAsyncTransfer(const U8* txData, U8* rxData, FwSizeType size);
+
+    //! DMA mode only: abort an in-flight TransmitReceive DMA transfer
+    //! (watchdog recovery). The abort itself completes via the same
+    //! completion ISR as a normal transfer.
+    void hwAbortAsyncTransfer();
+
+    //! DMA mode only: invalidate the D-cache over [rxData, rxData + size)
+    //! after a successful TransmitReceive DMA transfer, so the CPU reads
+    //! what the DMA controller actually wrote.
+    void hwFinishAsyncTransfer(U8* rxData, FwSizeType size);
 
     // ----------------------------------------------------------------------
     // Handler implementations for user-defined typed input ports
@@ -99,6 +141,13 @@ class Stm32SpiDriver final : public Stm32SpiDriverComponentBase {
     //! Drv::LinuxSpiDriver's convention for this deprecated port.
     void SpiReadWrite_handler(FwIndexType portNum, Fw::Buffer& writeBuffer, Fw::Buffer& readBuffer) override;
 
+    //! Asynchronous full-duplex transfer request (DMA-mode instances only).
+    //! No return value: the outcome is delivered later via
+    //! spiWriteReadAsyncComplete_out(), from poll(), never from this call.
+    //! Immediately replies SPI_OTHER_ERR if a transfer is already in flight
+    //! on this instance, or SPI_OPEN_ERR before open().
+    void spiWriteReadAsync_handler(FwIndexType portNum, Fw::Buffer& writeBuffer, Fw::Buffer& readBuffer) override;
+
     SpiInstance m_instance;
     Stm32::GpioPort m_csPort;
     U16 m_csPin;
@@ -107,9 +156,25 @@ class Stm32SpiDriver final : public Stm32SpiDriverComponentBase {
     bool m_opened;
 
     //! Completion/error state latched by signalDmaComplete()/signalDmaError()
-    //! and consumed by hwTransmitReceive()'s DMA-mode busy-wait.
+    //! and drained by poll() (DMA mode only).
     volatile bool m_dmaBusy;
     U32 m_dmaErrorCode;
+
+    //! True from an accepted spiWriteReadAsync request until poll() has
+    //! delivered its completion. Distinct from m_dmaBusy (ISR-cleared,
+    //! tracks only whether the transfer itself finished) so a second
+    //! poll() call after delivery does not re-deliver stale buffers.
+    bool m_asyncPending;
+
+    //! In-flight async transaction state, valid while m_asyncPending is
+    //! true. portNum identifies which spiWriteReadAsync/
+    //! spiWriteReadAsyncComplete array slot to reply on; the buffers are
+    //! handed back as-is to the completion callback (same convention as
+    //! Drv::SpiWriteReadCallback).
+    FwIndexType m_asyncPortNum;
+    Fw::Buffer m_asyncWriteBuffer;
+    Fw::Buffer m_asyncReadBuffer;
+    Os::RawTime m_asyncDmaStart;
 };
 
 }  // namespace Stm32

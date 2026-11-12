@@ -59,14 +59,54 @@ class Stm32I2cDriverTester final : public Stm32I2cDriverGTestBase {
     //! open() forwards an explicit DMA mode request to the HAL boundary
     void testOpenDma();
 
-    //! write()/read() in DMA mode perform the same logical transaction as
-    //! POLLED once the completion callback fires
-    void testWriteDmaSuccess();
-    void testReadDmaSuccess();
+    //! writeAsync()/readAsync() start a transaction and return without
+    //! delivering a completion; poll() later delivers it with the exact
+    //! bytes, never from inside the request call
+    void testWriteAsyncSuccess();
+    void testReadAsyncSuccess();
 
-    //! write() in DMA mode times out and reports an error when the
-    //! completion callback never fires (injected via Stub_dmaCompletes)
-    void testWriteDmaTimeout();
+    //! writeAsync()/readAsync()/writeReadAsync() report a HAL boundary
+    //! failure to START the transaction immediately (synchronously) and
+    //! emit HalError
+    void testWriteAsyncFailure();
+    void testReadAsyncFailure();
+
+    //! A second async request while one is already in flight is refused
+    //! immediately with I2C_OTHER_ERR; the first request's own completion
+    //! still arrives normally via a later poll()
+    void testWriteAsyncBusyRejectsSecondRequest();
+
+    //! poll() recovers via its own watchdog and reports an error when the
+    //! completion ISR never fires
+    void testWriteAsyncTimeout();
+
+    //! writeAsync()/readAsync()/writeReadAsync() before open() all report
+    //! I2C_OPEN_ERR immediately
+    void testWriteAsyncBeforeOpen();
+    void testReadAsyncBeforeOpen();
+    void testWriteReadAsyncBeforeOpen();
+
+    //! Issuing writeAsync()/readAsync()/writeReadAsync() on a POLLED-mode
+    //! instance is refused immediately with I2C_OTHER_ERR -- a POLLED
+    //! instance never registers for ISR callback routing, so starting a
+    //! DMA transaction on one would otherwise hang until poll()'s watchdog
+    void testWriteAsyncRejectedWhenNotDma();
+
+    //! writeReadAsync() runs the write phase, then (once it completes) the
+    //! read phase, delivering exactly one combined completion
+    void testWriteReadAsyncSuccess();
+
+    //! writeReadAsync() short-circuits on a failed write phase: the read
+    //! phase must never start
+    void testWriteReadAsyncWriteFailureShortCircuits();
+
+    //! writeReadAsync() propagates a failure from the read phase after a
+    //! successful write phase
+    void testWriteReadAsyncReadPhaseFailure();
+
+    //! poll() is a harmless no-op on an instance with no in-flight async
+    //! transaction (including a POLLED-mode instance, which never starts one)
+    void testPollNoOpWhenIdle();
 
     //! write()/read()/writeRead() before open() all report I2C_OPEN_ERR
     void testWriteBeforeOpen();
