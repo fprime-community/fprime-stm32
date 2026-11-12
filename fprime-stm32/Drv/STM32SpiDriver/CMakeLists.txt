@@ -12,7 +12,6 @@ endif()
 register_fprime_module(
   AUTOCODER_INPUTS
     "${CMAKE_CURRENT_LIST_DIR}/Stm32SpiDriver.fpp"
-    "${CMAKE_CURRENT_LIST_DIR}/AsyncSpiCfg.fpp"
   SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/Stm32SpiDriverCommon.cpp"
     "${STM32_SPI_DRIVER_IMPL_SOURCE}"
@@ -27,7 +26,6 @@ register_fprime_module(
 register_fprime_ut(
     AUTOCODER_INPUTS
         "${CMAKE_CURRENT_LIST_DIR}/Stm32SpiDriver.fpp"
-        "${CMAKE_CURRENT_LIST_DIR}/AsyncSpiCfg.fpp"
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/Stm32SpiDriverCommon.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/Stm32SpiDriverStub.cpp"

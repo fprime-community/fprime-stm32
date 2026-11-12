@@ -13,10 +13,10 @@ module Stm32 {
     @ `import Drv.AsyncGuardedSpi` because both Drv.Spi and
     @ Drv.AsyncGuardedSpi declare a guarded port literally named
     @ `SpiWriteRead`; FPP rejects importing both into one component as a
-    @ duplicate port name. Port types and array sizing are identical to
-    @ Drv.AsyncGuardedSpi's, so any client wired against that interface
-    @ (e.g. Samd21::SpiDriver's clients) connects here identically -- only
-    @ the port names differ.
+    @ duplicate port name. Port types and array sizing come from upstream
+    @ Drv.SpiWriteReadRequest/Drv.SpiWriteReadCallback/Drv.AsyncSpiCfg, so
+    @ any client wired against Drv.AsyncGuardedSpi (e.g. Samd21::SpiDriver's
+    @ clients) connects here identically -- only the port names differ.
     @ Every request is answered with exactly one SpiWriteReadComplete
     @ invocation (SPI_OK; SPI_OTHER_ERR if a transfer is already in flight on
     @ this instance; SPI_OTHER_ERR on a HAL/DMA error or watchdog timeout),
