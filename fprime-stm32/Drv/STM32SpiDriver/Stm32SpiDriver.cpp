@@ -302,7 +302,9 @@ Fw::Success Stm32SpiDriver ::open(SpiInstance instance,
     // MX_SPIn_Init() traps in Error_Handler() on failure rather than
     // returning a status (matches every other CubeMX-generated
     // MX_*_Init() in this project).
-    callInstanceInit(instance);
+    if (halHandle->State == HAL_SPI_STATE_RESET) {
+        callInstanceInit(instance);
+    }
 
     // SPI5 is configured NSS_SOFT: the HAL never drives a CS pin on its
     // own, so this driver owns the chip-select GPIO directly. Idle state
@@ -362,74 +364,50 @@ void Stm32SpiDriver ::hwSetCs(bool active) {
     HAL_GPIO_WritePin(halPort, this->m_csPin, active ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
 
+bool Stm32SpiDriver ::hwIsBusy() {
+    SPI_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
+    FW_ASSERT(halHandle != nullptr);
+    return halHandle->State != HAL_SPI_STATE_READY;
+}
+
 I32 Stm32SpiDriver ::hwTransmitReceive(const U8* txData, U8* rxData, FwSizeType size) {
     SPI_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
     FW_ASSERT(halHandle != nullptr);
     FW_ASSERT(txData != nullptr);
     FW_ASSERT(rxData != nullptr);
 
-    if (this->m_transferMode == TransferMode::POLLED) {
-        const HAL_StatusTypeDef status =
-            HAL_SPI_TransmitReceive(halHandle, const_cast<U8*>(txData), rxData, static_cast<uint16_t>(size),
-                                     this->m_timeoutMs);
-        return static_cast<I32>(status);
-    }
+    // POLLED mode only (see Stm32SpiDriver.hpp): DMA-mode instances serve
+    // spiWriteReadAsync via hwStartAsyncTransfer()/poll() instead, never
+    // this blocking path.
+    const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+        halHandle, const_cast<U8*>(txData), rxData, static_cast<uint16_t>(size), this->m_timeoutMs);
+    return static_cast<I32>(status);
+}
 
-    // DMA path: buffers must be reachable by the DMA controller (not DTCM)
-    // and the D-cache must be clean/invalidated around the transfer so the
-    // CPU and DMA controller agree on what's actually in RAM.
+I32 Stm32SpiDriver ::hwStartAsyncTransfer(const U8* txData, U8* rxData, FwSizeType size) {
+    SPI_HandleTypeDef* const halHandle = toHalHandle(this->m_instance);
+    FW_ASSERT(halHandle != nullptr);
+    FW_ASSERT(txData != nullptr);
+    FW_ASSERT(rxData != nullptr);
+
+    // Buffers must be reachable by the DMA controller (not DTCM) and the
+    // D-cache must be clean before the transfer so the DMA controller reads
+    // data the CPU has actually written.
     Stm32::AssertDmaSafe(txData, size);
     Stm32::AssertDmaSafe(rxData, size);
     Stm32::CleanDCacheForDma(txData, size);
 
-    this->m_dmaBusy = true;
-    this->m_dmaErrorCode = 0;
-    const HAL_StatusTypeDef startStatus =
+    const HAL_StatusTypeDef status =
         HAL_SPI_TransmitReceive_DMA(halHandle, const_cast<U8*>(txData), rxData, static_cast<uint16_t>(size));
-    if (startStatus != HAL_OK) {
-        this->m_dmaBusy = false;
-        return static_cast<I32>(startStatus);
-    }
+    return static_cast<I32>(status);
+}
 
-    // Block the caller until HAL_SPI_TxRxCpltCallback()/HAL_SPI_ErrorCallback()
-    // clears m_dmaBusy, or this transfer's own watchdog expires -- this is
-    // what lets DMA mode keep SpiWriteRead's synchronous port contract.
+void Stm32SpiDriver ::hwAbortAsyncTransfer() {
+    (void)HAL_SPI_Abort(toHalHandle(this->m_instance));
+}
 
-    this->unLock();
-    Os::RawTime dmaStart;
-    (void)dmaStart.now();
-    const U32 timeoutUs = this->m_timeoutMs * 1000U;
-    constexpr U32 MAX_DMA_POLL_ITERATIONS = 1000000U;  // hard backstop; the time check below is the real bound
-    for (U32 i = 0; this->m_dmaBusy && (i < MAX_DMA_POLL_ITERATIONS); i++) {
-        Os::RawTime now;
-        (void)now.now();
-        U32 elapsedUs = 0;
-        (void)now.getDiffUsec(dmaStart, elapsedUs);
-        if (elapsedUs >= timeoutUs) {
-            break;
-        }
-    }
-
-    if (this->m_dmaBusy) {
-        (void)HAL_SPI_Abort(halHandle);
-        // The abort itself completes via the same interrupt.
-        for (U32 i = 0; this->m_dmaBusy && (i < MAX_DMA_POLL_ITERATIONS); i++) {
-            Os::RawTime now;
-            (void)now.now();
-            U32 elapsedUs = 0;
-            (void)now.getDiffUsec(dmaStart, elapsedUs);
-            if (elapsedUs >= timeoutUs) {
-                break;
-            }
-        }
-        this->m_dmaBusy = false;
-        this->lock();
-        return static_cast<I32>(HAL_TIMEOUT);
-    }
-
-    this->lock();
+void Stm32SpiDriver ::hwFinishAsyncTransfer(U8* rxData, FwSizeType size) {
     Stm32::InvalidateDCacheForDma(rxData, size);
-    return (this->m_dmaErrorCode == 0) ? static_cast<I32>(HAL_OK) : static_cast<I32>(HAL_ERROR);
 }
 
 }  // namespace Stm32

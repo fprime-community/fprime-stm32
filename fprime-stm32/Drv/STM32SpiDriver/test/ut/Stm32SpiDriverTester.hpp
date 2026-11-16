@@ -53,18 +53,36 @@ class Stm32SpiDriverTester final : public Stm32SpiDriverGTestBase {
     //! open() forwards an explicit DMA mode request to the HAL boundary
     void testOpenDma();
 
-    //! SpiWriteRead() in DMA mode performs the same logical transfer as
-    //! POLLED (CS bracketing, exact tx/rx bytes) once the completion
-    //! callback fires
-    void testSpiWriteReadDmaSuccess();
+    //! spiWriteReadAsync() starts a transfer and returns without delivering
+    //! a completion; poll() later delivers it with the exact tx/rx bytes,
+    //! never from inside the request call
+    void testSpiWriteReadAsyncSuccess();
 
-    //! SpiWriteRead() in DMA mode propagates a HAL boundary failure status
-    //! reported after DMA "completion" and emits HalError
-    void testSpiWriteReadDmaFailure();
+    //! spiWriteReadAsync() reports a HAL boundary failure to START the
+    //! transfer immediately (synchronously) and emits HalError
+    void testSpiWriteReadAsyncFailure();
 
-    //! SpiWriteRead() in DMA mode times out and reports SPI_WRITE_ERR when
-    //! the completion callback never fires (injected via Stub_dmaCompletes)
-    void testSpiWriteReadDmaTimeout();
+    //! A second spiWriteReadAsync() request while one is already in flight
+    //! is refused immediately with SPI_OTHER_ERR; the first request's own
+    //! completion still arrives normally via a later poll()
+    void testSpiWriteReadAsyncBusyRejectsSecondRequest();
+
+    //! poll() recovers via its own watchdog and reports SPI_OTHER_ERR when
+    //! the completion ISR never fires
+    void testSpiWriteReadAsyncTimeout();
+
+    //! spiWriteReadAsync() before open() reports SPI_OPEN_ERR immediately
+    void testSpiWriteReadAsyncBeforeOpen();
+
+    //! Issuing spiWriteReadAsync() on a POLLED-mode instance is refused
+    //! immediately with SPI_OTHER_ERR -- a POLLED instance never registers
+    //! for ISR callback routing, so starting a DMA transfer on one would
+    //! otherwise hang until poll()'s watchdog
+    void testSpiWriteReadAsyncRejectedWhenNotDma();
+
+    //! poll() is a harmless no-op on an instance with no in-flight async
+    //! transfer (including a POLLED-mode instance, which never starts one)
+    void testPollNoOpWhenIdle();
 
     //! Re-opening the same component instance with a different mode switches
     //! its transfer behavior -- proves TransferMode is per-open() instance

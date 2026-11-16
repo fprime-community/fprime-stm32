@@ -26,6 +26,7 @@ register_fprime_config(
         Os_CountingSemaphore_Stub
         Fw_StringFormat_snprintf
         Fw_StringScan_sscanf
+        Fw_AssertHook_fputs
     BASE_CONFIG
 )
 

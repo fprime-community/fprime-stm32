@@ -2,7 +2,14 @@
 
 ## 1. Introduction
 
-`Stm32I2cDriver` is a bare-metal implementation of the [`Drv.I2c`](../../../fprime/Drv/Interfaces/I2c.fpp) interface for an STM32H7 I2C peripheral, selected per instance at `open()` time. It is a raw bus-master driver only: `write`/`read`/`writeRead` map onto a synchronous master transaction against whatever 7-bit address the caller supplies -- either blocking `HAL_I2C_Master_Transmit()`/`HAL_I2C_Master_Receive()` calls (`Stm32::TransferMode::POLLED`, the default) or their `_DMA` counterparts, which the handler blocks on until completion or timeout (`Stm32::TransferMode::DMA`), selected per-instance at `open()` time. There is no sensor-specific register model layered on top -- a sensor component (or a topology-level test command) is expected to drive this component's ports directly with the sensor's own register addressing convention.
+`Stm32I2cDriver` is a bare-metal implementation of the [`Drv.I2c`](../../../fprime/Drv/Interfaces/I2c.fpp) interface for an STM32H7 I2C peripheral, selected per instance at `open()` time. It is a raw bus-master driver only: there is no sensor-specific register model layered on top -- a sensor component (or a topology-level test command) is expected to drive this component's ports directly with the sensor's own register addressing convention.
+
+Each instance is opened in exactly one transfer mode, chosen by the caller at `open()` time:
+
+- **`Stm32::TransferMode::POLLED`** (the default): `write`/`read`/`writeRead` perform a single blocking `HAL_I2C_Master_Transmit()`/`HAL_I2C_Master_Receive()` call and return once the transaction is physically complete. The right choice for small, low-rate sensors (e.g. the MPU-6050 IMU).
+- **`Stm32::TransferMode::DMA`**: `write`/`read`/`writeRead` are **not** served in this mode (see §3.4) -- the instance instead serves `writeAsync`/`readAsync`/`writeReadAsync`, three request/completion port pairs. A request starts the matching `HAL_I2C_Master_*_DMA()` call and returns immediately; the transaction completes asynchronously, and `poll()` -- called every cyclic-executive pass, not from a rate group -- drains the ISR-latched outcome and invokes the matching completion port. This is the appropriate mode for anything that must not block the cyclic executive while a transaction is in flight.
+
+A single component instance is one or the other, fixed for its lifetime after `open()` -- there is no port that works in both modes.
 
 ## 2. Requirements
 
@@ -10,64 +17,79 @@
 |---|---|---|
 | STM32-I2C-COMP-001 | Shall implement the `Drv.I2c` interface | inspection |
 | STM32-I2C-COMP-002 | Shall configure a caller-selected I2C instance (via `MX_I2Cn_Init()`) at a caller-selected bus speed preset, and reject transactions issued before `open()` | inspection |
-| STM32-I2C-COMP-003 | Shall perform a write to a 7-bit slave address, bounded by a 10 ms transaction watchdog, using either a blocking call (POLLED) or a DMA transfer the caller blocks on (DMA), selected per instance at `open()` | inspection, test |
-| STM32-I2C-COMP-004 | Shall perform a read from a 7-bit slave address, bounded by a 10 ms transaction watchdog, in either POLLED or DMA mode | inspection, test |
-| STM32-I2C-COMP-005 | Shall perform a write followed by a read for the same address without requiring a second port invocation | inspection |
+| STM32-I2C-COMP-003 | Shall perform a blocking write to a 7-bit slave address via `write`, bounded by a 10 ms transaction watchdog, when opened `POLLED` | inspection, test |
+| STM32-I2C-COMP-004 | Shall perform a blocking read from a 7-bit slave address via `read`, bounded by a 10 ms transaction watchdog, when opened `POLLED` | inspection, test |
+| STM32-I2C-COMP-005 | Shall perform a blocking write followed by a read for the same address via `writeRead` without requiring a second port invocation, when opened `POLLED` | inspection |
 | STM32-I2C-COMP-006 | Shall distinguish an address-phase NACK (`I2C_ADDRESS_ERR`) from a data-phase/bus failure (`I2C_WRITE_ERR`/`I2C_READ_ERR`) | inspection |
-| STM32-I2C-COMP-007 | A DMA-mode transaction shall clean the D-cache over a write buffer before, and invalidate it over a read buffer after, the transfer, and shall assert both buffers are reachable by the DMA controller (not DTCM) | inspection |
+| STM32-I2C-COMP-007 | When opened DMA, shall serve `writeAsync`/`readAsync`/`writeReadAsync` requests by starting the matching `HAL_I2C_Master_*_DMA()` call(s) and returning immediately, delivering exactly one completion via the matching `*AsyncComplete` port per request, from `poll()`, never from an ISR and never from inside the request call | inspection, test |
+| STM32-I2C-COMP-008 | `writeReadAsync` shall run its write phase and read phase as two DMA transactions across separate `poll()` passes, delivering exactly one combined completion for the whole operation | inspection, test |
+| STM32-I2C-COMP-009 | A DMA-mode transaction shall clean the D-cache over a write buffer before, and invalidate it over a read buffer after, the transfer, and shall assert the buffer is reachable by the DMA controller (not DTCM) | inspection |
+| STM32-I2C-COMP-010 | `poll()` shall recover a DMA-mode transaction that exceeds its watchdog by aborting it and delivering an error completion, and shall be a harmless no-op when no transaction is in flight (including on a POLLED-mode instance, or a request rejected for not being DMA-mode) | inspection, test |
 
 ## 3. Design
 
 ### 3.1 Port model
 
-`import Drv.I2c` provides `write`/`read`/`writeRead` as guarded, synchronous input ports; each returns a `Drv::I2cStatus` to the caller directly, so there is no completion port and no telemetry. The only event is `HalError`, emitted from the HAL boundary whenever a blocking `HAL_I2C_*` call does not return `HAL_OK`.
+`import Drv.I2c` provides `write`/`read`/`writeRead` as guarded, synchronous input ports; each returns a `Drv::I2cStatus` to the caller directly, so there is no completion port and no telemetry for these three.
 
-These ports are deliberately `guarded`, not just `sync`: F´'s generated `*_handlerBase()` wrapper calls `this->lock()` before invoking the handler and `this->unLock()` after, serializing concurrent callers from different call contexts into this component's internal state (`m_dmaBusy`, `m_dmaErrorCode`, the re-resolved HAL handle) -- the same protection every guarded F´ port provides. See §3.6 for why DMA mode has to temporarily *undo* that lock partway through the call, and why that's safe on this target.
+Alongside those, `Stm32I2cDriver.fpp` hand-declares three asynchronous request/completion port pairs:
+
+- `writeAsync` / `writeAsyncComplete` (`Drv.I2cRequest` / `Drv.I2cCallback`)
+- `readAsync` / `readAsyncComplete` (`Drv.I2cRequest` / `Drv.I2cCallback`)
+- `writeReadAsync` / `writeReadAsyncComplete` (`Drv.I2cWriteReadRequest` / `Drv.I2cWriteReadCallback`)
+
+These are hand-declared (array-sized by `Drv.AsyncI2cCfg.I2cDriverPorts`, which **is** present in this project's pinned `fprime` version -- unlike SPI's equivalent constant, see `Stm32SpiDriver`'s own `docs/sdd.md` §3.1) rather than pulled in via `import Drv.AsyncGuardedI2c`, for the same reason as `Stm32SpiDriver`'s `spiWriteReadAsync`: `Drv.I2c` and `Drv.AsyncGuardedI2c` both declare guarded ports literally named `write`, `read`, and `writeRead`; FPP rejects importing both into one component as duplicate port names.
+
+All six ports (three synchronous, three asynchronous) are `guarded`, not just `sync`: F´'s generated `*_handlerBase()` wrapper calls `this->lock()` before invoking the handler and `this->unLock()` after, serializing concurrent callers into this component's internal state. For the synchronous ports this lock is held for the entire blocking POLLED transaction -- harmless, since nothing else needs to run while it blocks. For the async ports the lock is held only long enough to start the DMA transaction and return; the wait for completion happens later, in `poll()`, which is **not** called from inside any guarded port and therefore never holds this lock across the DMA wait (see §3.6 for why an earlier design -- blocking inside the guarded call -- was fatal).
+
+The only event is `HalError`, emitted from the HAL boundary whenever a blocking or DMA-start `HAL_I2C_*` call does not return `HAL_OK`.
 
 ### 3.2 Common/Real/Stub split
 
 Following the convention in `lib/fprime-stm32/README.md`, this driver splits into three files sharing one HAL-free header (`Stm32I2cDriver.hpp`):
 
-- `Stm32I2cDriverCommon.cpp` -- port handler logic and `open()`, all hardware-independent. Always built.
-- `Stm32I2cDriver.cpp` -- the real HAL boundary (`hwOpen`/`hwMasterTransmit`/`hwMasterReceive`/`hwIsAddressNack`), built only for the `stm32h7` target. The only file allowed to include `i2c.h`/call `HAL_I2C_*`.
+- `Stm32I2cDriverCommon.cpp` -- port handler logic, `open()`'s HAL-free bookkeeping, and the `poll()` state machine, all hardware-independent. Always built.
+- `Stm32I2cDriver.cpp` -- the real HAL boundary (`open`/`hwMasterTransmit`/`hwMasterReceive`/`hwStartAsyncTransmit`/`hwStartAsyncReceive`/`hwAbortAsyncTransaction`/`hwFinishAsyncReceive`), built only for the `stm32h7` target. The only file allowed to include `i2c.h`/call `HAL_I2C_*`.
 - `Stm32I2cDriverStub.cpp` -- the same boundary methods against injectable/observable stub state, built for host UT and any non-`stm32h7` build. Never included in a flight build.
 
 ### 3.3 `open(instance, busSpeed, mode)`
 
-`open()` takes an `I2cInstance` (`I2c1`/`I2c2`/`I2c3`/`I2c4`, mirroring `Stm32UartDriver`'s `UsartInstance` switch), an `I2cBusSpeed` preset (`Standard`/`Fast`, defaulting to `Fast` to match this project's current configuration), and a `Stm32::TransferMode` (default `POLLED`, trailing both other params so every existing call site keeps compiling and keeps its current, polled behavior unchanged). It calls the CubeMX-generated `MX_I2Cn_Init()` for the selected instance (I2C1/GPIO/clock configuration in `lib/fprime-stm32/src/i2c.c`), then applies the requested speed by overwriting `Init.Timing` and re-running `HAL_I2C_Init()` if it differs from what `MX_I2Cn_Init()` just applied.
+`open()` takes an `I2cInstance` (`I2c1`/`I2c2`/`I2c3`/`I2c4`, mirroring `Stm32SpiDriver`'s `SpiInstance` switch), an `I2cBusSpeed` preset (`Standard`/`Fast`/`FastPlus`, defaulting to `Fast` to match this project's current configuration), and a `Stm32::TransferMode` (default `POLLED`, trailing both other params so every existing call site keeps compiling and keeps its current, polled behavior unchanged). It calls the CubeMX-generated `MX_I2Cn_Init()` for the selected instance (I2C1/GPIO/clock configuration in `Hardware/stm32h753_hal/Core/Src/i2c.c`), then applies the requested speed by overwriting `Init.Timing` and re-running `HAL_I2C_Init()` if it differs from what `MX_I2Cn_Init()` just applied.
 
-When `mode` is `DMA`, `open()` additionally calls `MX_DMA_Init()`, asserts that CubeMX has actually linked a DMA stream to this instance (`halHandle->hdmatx`/`hdmarx` non-null -- see the warning in §3.5), and registers `{halHandle, this}` into a small fixed-size table (`s_i2cRegistry`, sized to `I2cInstance`'s cardinality) so `HAL_I2C_MasterTxCpltCallback()`/`HAL_I2C_MasterRxCpltCallback()`/`HAL_I2C_ErrorCallback()` -- plain HAL callbacks with no instance/context argument -- can route back to the correct component instance, the same registry pattern `Stm32UartDriver` uses for its own ISR callbacks (see its `docs/sdd.md` §3.7). A POLLED instance is never registered.
+When `mode` is `DMA`, `open()` additionally calls `MX_DMA_Init()`, asserts that CubeMX has actually linked a DMA stream to this instance (`halHandle->hdmatx`/`hdmarx` non-null -- see the warning in §3.5), and registers `{halHandle, this}` into a small fixed-size table (`s_i2cRegistry`, sized to `I2cInstance`'s cardinality) so `HAL_I2C_MasterTxCpltCallback()`/`HAL_I2C_MasterRxCpltCallback()`/`HAL_I2C_ErrorCallback()` -- plain HAL callbacks with no instance/context argument -- can route back to the correct component instance, the same registry pattern `Stm32UartDriver` uses for its own ISR callbacks (see its `docs/sdd.md` §3.7). A POLLED instance is never registered -- this is why `writeAsync_handler()`/`readAsync_handler()`/`writeReadAsync_handler()` reject every request on a POLLED instance (see §3.5): without a registry entry, the completion ISR would have nothing to call back into, and the request would silently run to its own watchdog timeout on every attempt instead of failing fast.
 
 Only `I2c1` has a CubeMX-generated handle/init function in this project today -- selecting `I2c2`/`I2c3`/`I2c4` asserts in the real HAL boundary (`Stm32I2cDriver.cpp`'s `toHalHandle()`/`callInstanceInit()`). Adding a second instance for a different board only requires generating that peripheral's CubeMX config and one switch case in each of those two functions; the header, `Common.cpp`, and the `Stub` are already instance-agnostic.
 
-Unlike UART's `BaudRate` (computed at runtime by `HAL_UART_Init()` from the peripheral clock), the STM32H7 I2C `Timing` register has no closed-form runtime formula in the HAL. `I2cBusSpeed`'s two presets map to two CubeMX-computed constants for this project's actual D2PCLK1 clock (`0x00B03FDB` for Fast, `0x307075B1` for Standard -- the latter was CubeMX's original preset before the "Increased I2C clock speed to 400 kHz" commit raised it). A third preset can only be added once CubeMX has actually generated its Timing value for this clock tree -- do not hand-derive one.
+Unlike UART's `BaudRate` (computed at runtime by `HAL_UART_Init()` from the peripheral clock), the STM32H7 I2C `Timing` register has no closed-form runtime formula in the HAL. `I2cBusSpeed`'s presets map to CubeMX-computed constants for this project's actual D2PCLK1 clock (`0x00B03FDB` for Fast, `0x307075B1` for Standard, `0x0050174F` for FastPlus). A new preset can only be added once CubeMX has actually generated its Timing value for this clock tree -- do not hand-derive one.
 
 `MX_I2Cn_Init()` traps in `Error_Handler()` on failure rather than returning a status, matching every other `MX_*_Init()` in this project, so `open()` cannot observe a failure there -- only the speed-override `HAL_I2C_Init()` call (when the requested preset differs from CubeMX's default) has a real failure path.
 
-**Multi-instance safety**: `open()` stores only the HAL-free `I2cInstance` enum and the requested `TransferMode` as component members; `hwMasterTransmit`/`hwMasterReceive` re-resolve `toHalHandle(this->m_instance)` fresh on every call, rather than caching the resolved `I2C_HandleTypeDef*` in file-static state. This is what lets two `Stm32I2cDriver` instances -- e.g. one for an IMU on I2C1 and a second for a temperature sensor on I2C2 -- be open at the same time, independently POLLED or DMA, with no shared mutable state between them.
+**Multi-instance safety**: `open()` stores only the HAL-free `I2cInstance` enum and the requested `TransferMode` as component members; every `hw*` boundary method re-resolves `toHalHandle(this->m_instance)` fresh on every call, rather than caching the resolved `I2C_HandleTypeDef*` in file-static state. This is what lets two `Stm32I2cDriver` instances -- e.g. one for an IMU on I2C1 and a second for a temperature sensor on I2C2 -- be open at the same time, independently POLLED or DMA, with no shared mutable state between them.
 
-### 3.4 `write`/`read`/`writeRead`
+### 3.4 `write`/`read`/`writeRead` (POLLED mode)
 
-Each handler asserts the caller's `Fw::Buffer`(s) are non-null and fit in a `U16` (the HAL's `Size`/`DevAddress` parameter width), then calls the corresponding `hw*` boundary method -- unchanged by `TransferMode`; the `POLLED`/`DMA` branch lives entirely inside `hwMasterTransmit()`/`hwMasterReceive()` (§3.5). On failure, `HAL_I2C_GetError() & HAL_I2C_ERROR_AF` distinguishes "no device answered" (`I2C_ADDRESS_ERR`) from a data-phase/bus failure (`I2C_WRITE_ERR`/`I2C_READ_ERR`).
+Each handler asserts the caller's `Fw::Buffer`(s) are non-null and fit in a `U16` (the HAL's `Size`/`DevAddress` parameter width), then calls the corresponding `hwMasterTransmit()`/`hwMasterReceive()` boundary method -- each a single blocking `HAL_I2C_Master_Transmit()`/`HAL_I2C_Master_Receive()` call bounded by `TRANSACTION_TIMEOUT_MS`. On failure, `HAL_I2C_GetError() & HAL_I2C_ERROR_AF` distinguishes "no device answered" (`I2C_ADDRESS_ERR`) from a data-phase/bus failure (`I2C_WRITE_ERR`/`I2C_READ_ERR`).
 
-`writeRead` issues a transmit immediately followed by a receive to the same address -- a STOP and a fresh START, not a single electrically-held repeated START, in either mode. Because this bus has exactly one master, a STOP-then-START is safe for the common case (nothing else can interrupt the sequence); a sensor that strictly requires the bus held across the register-address write (loses its internal pointer on STOP) will not work correctly until this is upgraded.
+`writeRead` issues a transmit immediately followed by a receive to the same address -- a STOP and a fresh START, not a single electrically-held repeated START. Because this bus has exactly one master, a STOP-then-START is safe for the common case (nothing else can interrupt the sequence); a sensor that strictly requires the bus held across the register-address write (loses its internal pointer on STOP) will not work correctly until this is upgraded to a sequential-transfer HAL call. `writeReadAsync`'s own two-phase design (§3.5) has the identical limitation for the same reason.
 
-### 3.5 `hwMasterTransmit()`/`hwMasterReceive()` and the DMA path
+### 3.5 `writeAsync`/`readAsync`/`writeReadAsync`/`poll()` (DMA mode)
 
-Both branch on `m_transferMode`:
+Each `*Async_handler()` (`Stm32I2cDriverCommon.cpp`):
 
-- **POLLED**: a single blocking `HAL_I2C_Master_Transmit()`/`HAL_I2C_Master_Receive()` call bounded by `TRANSACTION_TIMEOUT_MS`.
-- **DMA**: `Stm32::AssertDmaSafe()` on the buffer (it must not overlap DTCM), `Stm32::CleanDCacheForDma()` on a write, `HAL_I2C_Master_Transmit_DMA()`/`HAL_I2C_Master_Receive_DMA()`, then a bounded busy-wait (an `Os::RawTime`-timed loop, capped by `TRANSACTION_TIMEOUT_MS`) on a `volatile` flag that `HAL_I2C_MasterTxCpltCallback()`/`HAL_I2C_MasterRxCpltCallback()`/`HAL_I2C_ErrorCallback()` clear from the ISR. On timeout, `HAL_I2C_Master_Abort_IT()` runs and the caller sees the same error reporting as any other HAL failure. On a successful receive, `Stm32::InvalidateDCacheForDma()` runs on the read buffer before returning.
+1. Returns `I2C_OPEN_ERR` immediately (via its matching `*Complete_out()`) if the instance hasn't been `open()`ed.
+2. Returns `I2C_OTHER_ERR` immediately if the instance was not opened with `TransferMode::DMA` (see §3.3), or if a transaction is already in flight on this instance.
+3. Otherwise starts the transaction via `hwStartAsyncTransmit()`/`hwStartAsyncReceive()` (`Stm32::AssertDmaSafe()` on the buffer, `Stm32::CleanDCacheForDma()` on a write, `HAL_I2C_Master_Transmit_DMA()`/`HAL_I2C_Master_Receive_DMA()`) and returns. A HAL failure to even *start* is reported immediately; a successful start leaves the transaction in flight for `poll()` to observe later -- **never** from inside the handler call.
 
-**Known limitation**: this project's current CubeMX configuration for I2C1 has no DMA request attached (`lib/fprime-stm32/src/i2c.c`'s `HAL_I2C_MspInit()` never calls `__HAL_LINKDMA()`), so `open(..., TransferMode::DMA)` on I2C1 will fail its `hdmatx`/`hdmarx` assertion today rather than silently dereferencing a null DMA handle during a transaction. Using DMA mode on real hardware requires regenerating the CubeMX project with a DMA request added to the target I2C instance first -- the same prerequisite §3.3 already documents for enabling an instance beyond I2C1 at all.
+`writeReadAsync` is the one with extra state: it starts the write phase immediately (`AsyncOp::WRITE_READ_WRITE_PHASE`), and `poll()` -- on seeing that phase complete successfully -- starts the read phase (`AsyncOp::WRITE_READ_READ_PHASE`) using the same device address, rather than delivering a completion yet. Only the read phase's outcome (or an early write-phase failure) produces the single `writeReadAsyncComplete_out()` call the caller sees.
 
-### 3.6 Guarded ports and the DMA completion wait (`lock()`/`unLock()`)
+`poll()` is called every cyclic-executive pass (see `Main.cpp`'s `while(true)` loop, not from a rate group) and is a no-op whenever no async request is outstanding -- including, trivially, on a POLLED-mode instance, which never sets its in-flight flag. When a transaction is outstanding:
 
-`lock()`/`unLock()` are called in exactly two functions: `hwMasterTransmit()` and `hwMasterReceive()` (`Stm32I2cDriver.cpp`), and only inside each one's `DMA` branch -- never in the `POLLED` branch, and never anywhere in `Stm32I2cDriverCommon.cpp`. `write_handler()`/`read_handler()`/`writeRead_handler()` stay exactly as described in §3.4, oblivious to locking; they only ever reach `this->lock()`/`unLock()` indirectly, once, through the F´-generated `*_handlerBase()` wrapper around the whole guarded call (§3.1).
+- If the ISR (`HAL_I2C_MasterTxCpltCallback()`/`HAL_I2C_MasterRxCpltCallback()`/`HAL_I2C_ErrorCallback()`) has already latched an outcome, `poll()` picks it up directly.
+- Otherwise it checks the per-transaction watchdog (`TRANSACTION_TIMEOUT_MS`, `Os::RawTime`-timed); if still within budget it returns and tries again next pass; if exceeded, it calls `hwAbortAsyncTransaction()` (`HAL_I2C_Master_Abort_IT()` -- completes via the same ISR) and reports an error.
 
-On this bare-metal target, `lock()`/`unLock()` resolve to `Os::Mutex::take()`/`release()` (`Os/Stm32H7/Mutex.cpp`), which preserve/restore `PRIMASK` around `__disable_irq()` -- *every* maskable interrupt is globally disabled for as long as the lock is held, not just an I2C-specific one. That's harmless for the `POLLED` path (a single blocking `HAL_I2C_Master_Transmit`/`_Receive` call needs no interrupt to complete), but it is fatal for the `DMA` path exactly as implemented: `HAL_I2C_MasterTxCpltCallback()`/`HAL_I2C_MasterRxCpltCallback()`/`HAL_I2C_ErrorCallback()` only run because `I2C1_EV_IRQn`/`I2C1_ER_IRQn` fire -- interrupts `lock()` would be masking for the handler's entire guarded call. Left locked, the busy-wait in `waitForI2cDma()` would spin to its own timeout on *every* DMA transaction, unconditionally, regardless of whether the hardware/CubeMX wiring is otherwise correct -- which is exactly what happened the first time this path was exercised on real hardware.
+On a successful completion that involves a receive (`READ`, or `WRITE_READ`'s read phase), `poll()` runs `hwFinishAsyncReceive()` (`Stm32::InvalidateDCacheForDma()`) before invoking the matching completion port with the final status -- exactly once per accepted request.
 
-`hwMasterTransmit()`/`hwMasterReceive()` therefore call `this->unLock()` immediately before `waitForI2cDma()` (and keep it unlocked through the post-abort re-wait, if the first wait timed out), then `this->lock()` immediately after -- before touching `m_dmaBusy`/`m_dmaErrorCode` or returning. This is safe specifically because this executive is cooperative and non-preemptive: nothing but an ISR can run while the port is momentarily unlocked, and this codebase's ISRs never make F´ port calls (the same constraint `Stm32UartDriver` documents for its own callbacks), so no second caller can ever race into this guarded port during that window. A design that allowed true concurrent/preemptive callers would need a different mechanism here -- this one depends on there being exactly one execution context other than ISRs.
+**Known limitation**: this project's current CubeMX configuration for I2C1 has no DMA request attached (`Hardware/stm32h753_hal/Core/Src/i2c.c`'s `HAL_I2C_MspInit()` never calls `__HAL_LINKDMA()`), so `open(..., TransferMode::DMA)` on I2C1 will fail its `hdmatx`/`hdmarx` assertion today rather than silently dereferencing a null DMA handle during a transaction. Using DMA mode on real hardware requires regenerating the CubeMX project with a DMA request added to the target I2C instance first -- the same prerequisite §3.3 already documents for enabling an instance beyond I2C1 at all.
 
 ## 4. Usage
 
@@ -78,8 +100,24 @@ i2cDriver.open(Stm32::I2cInstance::I2c1, Stm32::I2cBusSpeed::Fast);
 // raw sensor probe/register read, e.g. from a test command or adapter component:
 Drv::I2cStatus status = i2cDriver.get_write_InputPort(0)->invoke(sensorAddr, regAddrBuffer);
 status = i2cDriver.get_writeRead_InputPort(0)->invoke(sensorAddr, regAddrBuffer, readDataBuffer);
+
+// A second instance on a different bus opted into DMA explicitly (requires
+// that instance's CubeMX DMA request to be wired first -- see the §3.5
+// known limitation):
+tempSensorDriver.open(Stm32::I2cInstance::I2c2, Stm32::I2cBusSpeed::Fast, Stm32::TransferMode::DMA);
+
+// Issuing a DMA-mode request: no return value, completion arrives later.
+tempSensorDriver.get_writeReadAsync_InputPort(0)->invoke(sensorAddr, regAddrBuffer, readDataBuffer);
+// ... the client component's own writeReadAsyncComplete input port handler
+//     receives (writeBuffer, readBuffer, status) once poll() delivers it
+//     (after both the write and read phases have run).
+
+// Main.cpp's cyclic-executive loop must call poll() every pass for any
+// DMA-mode instance -- a no-op if nothing is in flight, so safe to call
+// unconditionally even for a POLLED-mode instance:
+tempSensorDriver.poll();
 ```
 
 Note that the caller owns the buffers passed to each port; the driver does not retain or deallocate them.
 
-To use a different I2C instance: enable it in `Stm32Config.hpp` (its `I2Cn_Instance` macro), regenerate the CubeMX project with that peripheral configured, call `open()`, then pass the matching `Stm32::I2cInstance` value to `open()` as well as the matching `Stm32::I2cBusSpeed`.
+To use a different I2C instance: enable it in `Stm32Config.hpp` (its `I2Cn_Instance` macro), regenerate the CubeMX project with that peripheral configured, then pass the matching `Stm32::I2cInstance` value to `open()` along with the matching `Stm32::I2cBusSpeed`.
