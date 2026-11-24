@@ -30,6 +30,28 @@ STM32H753XI-EVAL2:
 LED2 and LED4 are routed through the external MFX I2C expander and are not
 used by the direct bare-metal GPIO examples.
 
+## Flashing a deployment
+
+From an F Prime project root, build and install the deployment first, then use
+Python 3.10 or later and STM32CubeProgrammer with the board's ST-LINK:
+
+```sh
+python3 lib/fprime-stm32/fprime-stm32/tools/flash.py --list
+python3 lib/fprime-stm32/fprime-stm32/tools/flash.py                  # interactive
+python3 lib/fprime-stm32/fprime-stm32/tools/flash.py RadioReference   # named
+```
+
+The tool reads `default_toolchain` from `settings.ini` and selects installed
+images from `build-artifacts/<toolchain>/<deployment>/bin/<deployment>`; it
+does not build the image. Use `--build-dir <path>` for a CMake build directory,
+`--toolchain` to override the configured toolchain, `--project-root` when
+running outside the project, or `--serial` to select an ST-LINK probe.
+`--dry-run` prints the selected image and command without connecting. The
+programmer is located on `PATH` or in the newest versioned Linux STM32Cube
+bundle under `~/.local/share/stm32cube/bundles/programmer`; `--programmer`
+selects an explicit executable. Flashing downloads the ELF over SWD, verifies
+it, and resets the board. Make sure the image matches the connected target.
+
 ## Contents
 
 - `Os/Stm32H7`: STM32H7 bare-metal delegates for Task, Mutex, Queue, and RawTime
