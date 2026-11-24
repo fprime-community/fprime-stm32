@@ -36,9 +36,9 @@ From an F Prime project root, build and install the deployment first, then use
 Python 3.10 or later and STM32CubeProgrammer with the board's ST-LINK:
 
 ```sh
-python3 lib/fprime-stm32/fprime-stm32/tools/flash.py --list
-python3 lib/fprime-stm32/fprime-stm32/tools/flash.py                  # interactive
-python3 lib/fprime-stm32/fprime-stm32/tools/flash.py RadioReference   # named
+python3 lib/fprime-stm32/tools/flash-stlink/flash.py --list
+python3 lib/fprime-stm32/tools/flash-stlink/flash.py                  # interactive
+python3 lib/fprime-stm32/tools/flash-stlink/flash.py RadioReference   # named
 ```
 
 The tool reads `default_toolchain` from `settings.ini` and selects installed
